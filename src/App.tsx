@@ -522,6 +522,11 @@ interface ChartPoint {
   value: number
 }
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
+}
+
 function getEmotionDisplayName(label: string, language: 'en' | 'fa'): string {
   const primary = EMOTION_GROUPS.find((group) => group.labelEn === label)
   if (primary) {
@@ -553,6 +558,8 @@ function App() {
   const [isEditorOpen, setIsEditorOpen] = useState(false)
   const [isInsightsOpen, setIsInsightsOpen] = useState(false)
   const [isImportExportOpen, setIsImportExportOpen] = useState(false)
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
+  const [isInstalled, setIsInstalled] = useState(false)
   const [editingHabitId, setEditingHabitId] = useState<string | null>(null)
   const [insightHabitId, setInsightHabitId] = useState<string | null>(null)
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
@@ -574,6 +581,42 @@ function App() {
     document.documentElement.lang = language
     document.documentElement.dir = language === 'fa' ? 'rtl' : 'ltr'
   }, [language])
+
+  useEffect(() => {
+    function onBeforeInstallPrompt(event: Event) {
+      const installEvent = event as BeforeInstallPromptEvent
+      installEvent.preventDefault()
+      setDeferredInstallPrompt(installEvent)
+    }
+
+    function onAppInstalled() {
+      setIsInstalled(true)
+      setDeferredInstallPrompt(null)
+      setRewardMessage(tx('App installed successfully.', 'برنامه با موفقیت نصب شد.'))
+    }
+
+    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+    window.addEventListener('appinstalled', onAppInstalled)
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+      window.removeEventListener('appinstalled', onAppInstalled)
+    }
+  }, [language])
+
+  async function installPwa(): Promise<void> {
+    if (!deferredInstallPrompt) {
+      return
+    }
+
+    await deferredInstallPrompt.prompt()
+    const choiceResult = await deferredInstallPrompt.userChoice
+    if (choiceResult.outcome === 'accepted') {
+      setRewardMessage(tx('Thanks for installing ✨', 'مرسی از نصب برنامه ✨'))
+      setIsInstalled(true)
+    }
+    setDeferredInstallPrompt(null)
+  }
 
   useEffect(() => {
     let mounted = true
@@ -1056,6 +1099,11 @@ function App() {
             <button className="secondary-btn" onClick={() => setIsInsightsOpen(true)}>
               {tx('Insights', 'تحلیل‌ها')}
             </button>
+            {!isInstalled && deferredInstallPrompt && (
+              <button className="secondary-btn" onClick={() => void installPwa()}>
+                {tx('Install', 'نصب')}
+              </button>
+            )}
             <button
               className="secondary-btn"
               onClick={() => setLanguage((prev) => (prev === 'en' ? 'fa' : 'en'))}
