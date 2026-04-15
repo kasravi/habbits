@@ -1,0 +1,129 @@
+{
+  "Fear": {
+    "Core": "ترس",
+    "Aspects": {
+      "Anxiety": "اضطراب",
+      "Apprehension": "دلشوره",
+      "Nervousness": "تنش عصبی",
+      "Concern": "نگرانی",
+      "Consternation": "بهت",
+      "Misgiving": "بدگمانی",
+      "Wariness": "احتیاط",
+      "Qualm": "تردید",
+      "Edginess": "بی‌آرامی",
+      "Dread": "وحشت",
+      "Fright": "هراس",
+      "Terror": "رعب",
+      "Phobia": "ترس بیمارگونه",
+      "Panic": "هراس ناگهانی"
+    }
+  },
+  "Anger": {
+    "Core": "خشم",
+    "Aspects": {
+      "Fury": "غضب",
+      "Outrage": "خشم شدید",
+      "Resentment": "رنجش",
+      "Wrath": "غیظ",
+      "Exasperation": "استیصال",
+      "Indignation": "خشم اخلاقی",
+      "Vexation": "آزردگی",
+      "Acrimony": "تندی",
+      "Animosity": "خصومت",
+      "Annoyance": "کلافگی",
+      "Irritability": "زودرنجی",
+      "Hostility": "دشمنی",
+      "Hatred": "تنفر",
+      "Violence": "خشونت"
+    }
+  },
+  "Sadness": {
+    "Core": "غم",
+    "Aspects": {
+      "Grief": "سوگواری",
+      "Sorrow": "اندوه",
+      "Cheerlessness": "بی‌نشاطی",
+      "Gloom": "تاری",
+      "Melancholy": "حزن",
+      "Self-pity": "خوددلسوزی",
+      "Loneliness": "تنهایی",
+      "Dejection": "دلسردی",
+      "Despair": "ناامیدی",
+      "Depression": "افسردگی"
+    }
+  },
+  "Enjoyment": {
+    "Core": "لذت",
+    "Aspects": {
+      "Happiness": "خوشحالی",
+      "Joy": "شادی",
+      "Relief": "تسکین",
+      "Contentment": "رضایت",
+      "Bliss": "سعادت",
+      "Delight": "شعف",
+      "Amusement": "سرگرمی",
+      "Pride": "افتخار",
+      "Sensual pleasure": "لذت حسی",
+      "Thrill": "هیجان",
+      "Rapture": "وجد",
+      "Gratification": "پاداش درونی",
+      "Satisfaction": "خشنودی",
+      "Euphoria": "سرخوشی",
+      "Whimsy": "خیال‌پردازی",
+      "Ecstasy": "خلسه",
+      "Mania": "شیدایی"
+    }
+  },
+  "Love": {
+    "Core": "عشق",
+    "Aspects": {
+      "Acceptance": "پذیرش",
+      "Friendliness": "رفاقت",
+      "Trust": "اعتماد",
+      "Kindness": "مهربانی",
+      "Affinity": "نزدیکی",
+      "Devotion": "فداکاری",
+      "Adoration": "پرستش",
+      "Infatuation": "شیفتگی",
+      "Agape": "عشق معنوی"
+    }
+  },
+  "Disgust": {
+    "Core": "بیزاری",
+    "Aspects": {
+      "Contempt": "تحقیر",
+      "Disdain": "اهانت",
+      "Scorn": "تمسخر",
+      "Abhorrence": "اشمئزاز",
+      "Aversion": "اکراه",
+      "Distaste": "ناگواری",
+      "Revulsion": "انزجار"
+    }
+  },
+  "Surprise": {
+    "Core": "غافلگیری",
+    "Aspects": {
+      "Shock": "شوک",
+      "Astonishment": "شگفتی",
+      "Amazement": "حیرت",
+      "Wonder": "تعجب"
+    }
+  },
+  "Shame": {
+    "Core": "شرم",
+    "Aspects": {
+      "Guilt": "احساس گناه",
+      "Embarrassment": "خجالت",
+      "Chagrin": "آزردگی خاطر",
+      "Remorse": "پشیمانی",
+      "Humiliation": "ذلت",
+      "Regret": "افسوس",
+      "Mortification": "شرمساری شدید",
+      "Contrition": "ندامت"
+    }
+  },
+  "Concepts": {
+    "Flow": "غرقگی",
+    "Ambivalence": "تضاد احساسی"
+  }
+}
