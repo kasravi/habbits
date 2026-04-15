@@ -567,13 +567,14 @@ function App() {
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
   const [srhiHabitId, setSrhiHabitId] = useState<string | null>(null)
   const [srhiDraft, setSrhiDraft] = useState<[number, number, number, number]>([4, 4, 4, 4])
+  const [clockNow, setClockNow] = useState<Date>(() => new Date())
   const addButtonTimer = useRef<number | null>(null)
   const ignoreAddClick = useRef(false)
   const cardLongPressTimer = useRef<number | null>(null)
   const importInputRef = useRef<HTMLInputElement | null>(null)
 
-  const todayKey = useMemo(() => getEffectiveDayKey(), [isLoaded, logs.length])
-  const currentPhase = useMemo(() => getCurrentPhase(), [isLoaded, logs.length])
+  const todayKey = useMemo(() => getEffectiveDayKey(clockNow), [clockNow])
+  const currentPhase = useMemo(() => getCurrentPhase(clockNow), [clockNow])
   const tx = (en: string, fa: string): string => (language === 'fa' ? fa : en)
 
   useEffect(() => {
@@ -650,8 +651,8 @@ function App() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setLogs((prev) => [...prev])
-    }, 60000)
+      setClockNow(new Date())
+    }, 30000)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -1155,6 +1156,7 @@ function App() {
             >
               <div className="habit-header">
                 <h2>{habit.name}</h2>
+                <span className="phase-chip">{getPhaseLabel(habit.phase, language)}</span>
               </div>
 
               <p className="status-line">
