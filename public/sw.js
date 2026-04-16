@@ -1,4 +1,4 @@
-const CACHE_NAME = 'habbits-pwa-v2'
+const CACHE_NAME = 'habbits-pwa-v3'
 
 function getBasePath() {
   const scope = self.registration?.scope
@@ -24,6 +24,12 @@ const ASSETS = [
   withBase('icons/icon-512.png'),
 ]
 
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting()
+  }
+})
+
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)))
   self.skipWaiting()
@@ -47,9 +53,41 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
+  const requestUrl = new URL(event.request.url)
+  const isNavigationRequest = event.request.mode === 'navigate'
+  const isSameOrigin = requestUrl.origin === self.location.origin
+
+  if (isNavigationRequest) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.status === 200) {
+            const responseClone = networkResponse.clone()
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(withBase('index.html'), responseClone)
+            })
+          }
+          return networkResponse
+        })
+        .catch(() => caches.match(withBase('index.html'))),
+    )
+    return
+  }
+
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
+      if (cachedResponse && isSameOrigin) {
+        fetch(event.request)
+          .then((networkResponse) => {
+            if (!networkResponse || networkResponse.status !== 200) {
+              return
+            }
+            const responseClone = networkResponse.clone()
+            caches.open(CACHE_NAME).then((cache) => {
+              cache.put(event.request, responseClone)
+            })
+          })
+          .catch(() => undefined)
         return cachedResponse
       }
 

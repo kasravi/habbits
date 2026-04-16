@@ -137,6 +137,22 @@ function getRiskHint(title: string, language: 'en' | 'fa'): string {
   return 'خودکار شده؛ یک روز لغزش معمولاً قابل جبران است.'
 }
 
+function getDifficultyQualifier(k: number, language: 'en' | 'fa'): string {
+  if (k >= 0.08) {
+    return language === 'fa' ? 'خیلی آسان' : 'Very easy'
+  }
+  if (k >= 0.06) {
+    return language === 'fa' ? 'آسان' : 'Easy'
+  }
+  if (k >= 0.045) {
+    return language === 'fa' ? 'متوسط' : 'Moderate'
+  }
+  if (k >= 0.03) {
+    return language === 'fa' ? 'سخت' : 'Difficult'
+  }
+  return language === 'fa' ? 'خیلی سخت' : 'Super difficult'
+}
+
 interface HabitDraft {
   name: string
   description: string
@@ -194,12 +210,20 @@ function shiftDayKey(dayKey: string, deltaDays: number): string {
 
 function getCurrentPhase(now = new Date()): HabitPhase {
   const hour = now.getHours()
-  if (hour >= 3 && hour < 12) {
+  const minute = now.getMinutes()
+
+  if (hour < 3) {
+    return 'beforeBed'
+  }
+
+  if (hour < 16 || (hour === 16 && minute < 30)) {
     return 'morning'
   }
-  if (hour >= 12 && hour < 20) {
+
+  if (hour < 22) {
     return 'afterWork'
   }
+
   return 'beforeBed'
 }
 
@@ -262,6 +286,36 @@ function getPeriodProgress(
     completed: done >= target,
     label: `${done}/${target} this week`,
   }
+}
+
+function getWeekDayOffset(dayKey: string): number {
+  const weekStart = getWeekStart(dayKey)
+  const startDate = dayKeyToDate(weekStart)
+  const currentDate = dayKeyToDate(dayKey)
+  const diffMs = currentDate.getTime() - startDate.getTime()
+  return Math.max(0, Math.min(6, Math.floor(diffMs / (1000 * 60 * 60 * 24))))
+}
+
+function shouldShowHabitBySchedule(
+  habit: Habit,
+  logs: HabitLog[],
+  todayKey: string,
+): boolean {
+  const progress = getPeriodProgress(habit, logs, todayKey)
+  if (progress.completed) {
+    return false
+  }
+
+  if (habit.desiredFrequency.per === 'day') {
+    return true
+  }
+
+  const target = Math.max(1, habit.desiredFrequency.count)
+  const doneThisWeek = progress.done
+  const nextDueDayOffset = Math.min(6, Math.floor((doneThisWeek * 7) / target))
+  const currentDayOffset = getWeekDayOffset(todayKey)
+
+  return currentDayOffset >= nextDueDayOffset
 }
 
 function getConsecutiveSuccessUnits(habit: Habit, logs: HabitLog[], todayKey: string): number {
@@ -676,7 +730,7 @@ function App() {
 
     return habits
       .filter((habit) => !habit.archived && PHASE_ORDER.indexOf(habit.phase) <= currentPhaseIndex)
-      .filter((habit) => !getPeriodProgress(habit, logs, todayKey).completed)
+      .filter((habit) => shouldShowHabitBySchedule(habit, logs, todayKey))
       .sort((a, b) => {
         const phaseDiff = PHASE_ORDER.indexOf(b.phase) - PHASE_ORDER.indexOf(a.phase)
         if (phaseDiff !== 0) {
@@ -1384,9 +1438,9 @@ function App() {
             </label>
             <input
               id="habit-difficulty-k"
-              className="text-input"
-              type="number"
-              step="0.005"
+              className="range-input"
+              type="range"
+              step="0.001"
               min={0.01}
               max={0.12}
               value={draft.difficultyK}
@@ -1397,6 +1451,9 @@ function App() {
                 }))
               }
             />
+            <p className="difficulty-helper">
+              k = {draft.difficultyK.toFixed(3)} · {getDifficultyQualifier(draft.difficultyK, language)}
+            </p>
 
             <label className="field-label" htmlFor="habit-report">
               {tx('Reporting type', 'نوع گزارش')}
