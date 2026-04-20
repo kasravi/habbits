@@ -139,6 +139,29 @@ body {
   color: #374151;
 }
 
+.stage-progress {
+  margin: 8px 0 4px;
+}
+
+.stage-progress-label {
+  margin: 0 0 5px;
+  font-size: 0.78rem;
+  color: #4b5563;
+}
+
+.stage-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.stage-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #60a5fa, #34d399);
+}
+
 .habit-card.tier-fragile {
   background: #fff5f5;
   border-color: #fecaca;
@@ -421,6 +444,12 @@ body {
   background: #f9fafb;
 }
 
+.chart-block-head {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
 .bar-chart {
   display: grid;
   grid-template-columns: repeat(14, minmax(0, 1fr));
@@ -457,6 +486,56 @@ body {
   font-size: 0.62rem;
   color: #6b7280;
   white-space: nowrap;
+}
+
+.line-chart-wrap {
+  width: 100%;
+  overflow: hidden;
+}
+
+.line-chart {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  display: block;
+}
+
+.insight-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.insight-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f9fafb;
+  overflow: hidden;
+}
+
+.insight-card-head {
+  width: 100%;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #111827;
+  cursor: pointer;
+}
+
+.insight-card-body {
+  border-top: 1px solid #e5e7eb;
+  padding: 8px;
+}
+
+.insight-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
 }
 
 .insight-split {
@@ -516,5 +595,9 @@ body {
 
   .bar-chart {
     gap: 3px;
+  }
+
+  .insight-card-head {
+    padding: 9px;
   }
 }

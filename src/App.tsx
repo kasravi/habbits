@@ -1,4 +1,5 @@
 import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import * as d3 from 'd3'
 import {
   type Habit,
   type HabitLog,
@@ -153,12 +154,29 @@ function getDifficultyQualifier(k: number, language: 'en' | 'fa'): string {
   return language === 'fa' ? 'خیلی سخت' : 'Super difficult'
 }
 
+function getDecayQualifier(decayFactor: number, language: 'en' | 'fa'): string {
+  if (decayFactor <= 0.62) {
+    return language === 'fa' ? 'حساس به شکست' : 'Break-sensitive'
+  }
+  if (decayFactor <= 0.74) {
+    return language === 'fa' ? 'حساس' : 'Sensitive'
+  }
+  if (decayFactor <= 0.86) {
+    return language === 'fa' ? 'متعادل' : 'Balanced'
+  }
+  if (decayFactor <= 0.93) {
+    return language === 'fa' ? 'بخشنده' : 'Forgiving'
+  }
+  return language === 'fa' ? 'خیلی بخشنده' : 'Very forgiving'
+}
+
 interface HabitDraft {
   name: string
   description: string
   desiredCount: number
   desiredPer: 'day' | 'week'
   difficultyK: number
+  decayFactor: number
   phase: HabitPhase
   reportingType: ReportingType
 }
@@ -179,6 +197,7 @@ function defaultDraft(): HabitDraft {
     desiredCount: 1,
     desiredPer: 'day',
     difficultyK: 0.05,
+    decayFactor: 0.82,
     phase: 'morning',
     reportingType: 'button',
   }
@@ -320,24 +339,65 @@ function shouldShowHabitBySchedule(
 
 function getConsecutiveSuccessUnits(habit: Habit, logs: HabitLog[], todayKey: string): number {
   const target = Math.max(1, habit.desiredFrequency.count)
+  const habitLogs = logs.filter((log) => log.habitId === habit.id)
+
+  if (!habitLogs.length) {
+    return 0
+  }
+
+  const momentumDecay = clamp(habit.decayFactor, 0.5, 0.98)
+  const partialDecay = clamp((momentumDecay + 1) / 2, 0.75, 0.995)
+  let units = 0
 
   if (habit.desiredFrequency.per === 'day') {
-    let streak = 0
-    let cursor = shiftDayKey(todayKey, -1)
-    while (countHabitCompletionsForDay(habit.id, cursor, logs) >= target) {
-      streak += 1
-      cursor = shiftDayKey(cursor, -1)
+    const firstDay = habitLogs
+      .map((log) => log.dayKey)
+      .sort((a, b) => a.localeCompare(b))[0]
+    let cursor = firstDay
+    const endExclusive = todayKey
+
+    while (cursor < endExclusive) {
+      const done = countHabitCompletionsForDay(habit.id, cursor, logs)
+      const ratio = clamp(done / target, 0, 1)
+
+      if (ratio >= 1) {
+        units += 1
+      } else if (ratio > 0) {
+        units = units * partialDecay + ratio
+      } else {
+        units *= momentumDecay
+      }
+
+      cursor = shiftDayKey(cursor, 1)
     }
-    return streak
+
+    return units
   }
 
-  let streak = 0
-  let cursor = shiftDayKey(getWeekStart(todayKey), -7)
-  while (countHabitCompletionsForWeek(habit.id, cursor, logs) >= target) {
-    streak += 1
-    cursor = shiftDayKey(cursor, -7)
+  const firstWeek = getWeekStart(
+    habitLogs
+      .map((log) => log.dayKey)
+      .sort((a, b) => a.localeCompare(b))[0],
+  )
+  const endExclusive = getWeekStart(todayKey)
+  let cursor = firstWeek
+
+  while (cursor < endExclusive) {
+    const done = countHabitCompletionsForWeek(habit.id, cursor, logs)
+    const ratio = clamp(done / target, 0, 1)
+
+    if (ratio >= 1) {
+      units += 1
+    } else if (ratio > 0) {
+      units = units * partialDecay + ratio
+    } else {
+      units *= momentumDecay
+    }
+
+    cursor = shiftDayKey(cursor, 7)
   }
-  return streak
+
+  return units
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -379,6 +439,34 @@ function getRiskTier(strength: number): {
     icon: '✨',
     className: 'tier-automatic',
     hint: 'Strong autopilot. One off day is usually recoverable.',
+  }
+}
+
+function getStageProgress(strength: number): {
+  current: 'Fragile' | 'Forming' | 'Automatic'
+  next: 'Forming' | 'Automatic' | null
+  progressPct: number
+} {
+  if (strength <= 20) {
+    return {
+      current: 'Fragile',
+      next: 'Forming',
+      progressPct: clamp((strength / 20) * 100, 0, 100),
+    }
+  }
+
+  if (strength <= 70) {
+    return {
+      current: 'Forming',
+      next: 'Automatic',
+      progressPct: clamp(((strength - 20) / 50) * 100, 0, 100),
+    }
+  }
+
+  return {
+    current: 'Automatic',
+    next: null,
+    progressPct: clamp(((strength - 70) / 30) * 100, 0, 100),
   }
 }
 
@@ -524,11 +612,14 @@ function getRecentDayKeys(todayKey: string, days: number): string[] {
   return Array.from({ length: days }, (_, index) => shiftDayKey(todayKey, -(days - 1 - index)))
 }
 
-function getRecentWeekStarts(todayKey: string, weeks: number): string[] {
-  const currentWeek = getWeekStart(todayKey)
-  return Array.from({ length: weeks }, (_, index) =>
-    shiftDayKey(currentWeek, -7 * (weeks - 1 - index)),
-  )
+function getDayKeysBetween(startDayKey: string, endDayKey: string): string[] {
+  const keys: string[] = []
+  let cursor = startDayKey
+  while (cursor <= endDayKey) {
+    keys.push(cursor)
+    cursor = shiftDayKey(cursor, 1)
+  }
+  return keys
 }
 
 function shortDayLabel(dayKey: string): string {
@@ -536,65 +627,154 @@ function shortDayLabel(dayKey: string): string {
   return `${date.getMonth() + 1}/${date.getDate()}`
 }
 
-function getAllHabitCoverageForDay(habits: Habit[], logs: HabitLog[], dayKey: string): number {
-  if (!habits.length) {
-    return 0
-  }
-
-  const ratioSum = habits.reduce((sum, habit) => {
-    if (habit.desiredFrequency.per === 'day') {
-      const done = countHabitCompletionsForDay(habit.id, dayKey, logs)
-      return sum + Math.min(1, done / Math.max(1, habit.desiredFrequency.count))
-    }
-
-    const weekStart = getWeekStart(dayKey)
-    const done = countHabitCompletionsForWeek(habit.id, weekStart, logs)
-    return sum + Math.min(1, done / Math.max(1, habit.desiredFrequency.count))
-  }, 0)
-
-  return ratioSum / habits.length
-}
-
-function getTopWordsFromReports(reports: ParsedReport[], limit = 8): Array<[string, number]> {
-  const wordCounts = new Map<string, number>()
-  for (const report of reports) {
-    const words = (report.text ?? '')
-      .toLowerCase()
-      .replace(/[^a-z\s]/g, ' ')
-      .split(/\s+/)
-      .filter((word) => word.length > 3 && !STOP_WORDS.has(word))
-    for (const word of words) {
-      wordCounts.set(word, (wordCounts.get(word) ?? 0) + 1)
-    }
-  }
-
-  return [...wordCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit)
-}
-
 interface ChartPoint {
   label: string
   value: number
 }
 
+interface StrengthLineChartProps {
+  data: ChartPoint[]
+  color: string
+  fill: string
+}
+
+function StrengthLineChart({ data, color, fill }: StrengthLineChartProps) {
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const [chartWidth, setChartWidth] = useState(620)
+
+  useEffect(() => {
+    const wrapElement = wrapRef.current
+    if (!wrapElement) {
+      return
+    }
+
+    const updateWidth = () => {
+      const nextWidth = Math.max(320, Math.round(wrapElement.clientWidth))
+      setChartWidth(nextWidth)
+    }
+
+    updateWidth()
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(wrapElement)
+
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    const svgElement = svgRef.current
+    if (!svgElement) {
+      return
+    }
+
+    const width = chartWidth
+    const height = 170
+    const margin = { top: 8, right: 10, bottom: 32, left: 28 }
+    const innerWidth = width - margin.left - margin.right
+    const innerHeight = height - margin.top - margin.bottom
+
+    const svg = d3.select(svgElement)
+    svg.selectAll('*').remove()
+
+    const root = svg
+      .append('g')
+      .attr('transform', `translate(${margin.left},${margin.top})`)
+
+    const x = d3
+      .scaleLinear()
+      .domain([0, Math.max(0, data.length - 1)])
+      .range([0, innerWidth])
+
+    const y = d3
+      .scaleLinear()
+      .domain([0, 100])
+      .range([innerHeight, 0])
+
+    root
+      .selectAll('line.grid')
+      .data([0, 25, 50, 75, 100])
+      .enter()
+      .append('line')
+      .attr('x1', 0)
+      .attr('x2', innerWidth)
+      .attr('y1', (d: number) => y(d))
+      .attr('y2', (d: number) => y(d))
+      .attr('stroke', '#e5e7eb')
+      .attr('stroke-width', 1)
+
+    const area = d3
+      .area<ChartPoint>()
+      .x((_: ChartPoint, index: number) => x(index))
+      .y0(y(0))
+      .y1((d: ChartPoint) => y(d.value))
+      .curve(d3.curveMonotoneX)
+
+    const line = d3
+      .line<ChartPoint>()
+      .x((_: ChartPoint, index: number) => x(index))
+      .y((d: ChartPoint) => y(d.value))
+      .curve(d3.curveMonotoneX)
+
+    if (data.length > 0) {
+      root
+        .append('path')
+        .datum(data)
+        .attr('fill', fill)
+        .attr('d', area)
+
+      root
+        .append('path')
+        .datum(data)
+        .attr('fill', 'none')
+        .attr('stroke', color)
+        .attr('stroke-width', 2)
+        .attr('d', line)
+
+      root
+        .append('circle')
+        .attr('cx', x(data.length - 1))
+        .attr('cy', y(data[data.length - 1].value))
+        .attr('r', 3.5)
+        .attr('fill', color)
+    }
+
+    const tickStep = Math.max(1, Math.floor(data.length / 6))
+    const tickIndexes = new Set<number>([0, Math.max(0, data.length - 1)])
+    for (let index = 0; index < data.length; index += tickStep) {
+      tickIndexes.add(index)
+    }
+
+    const ticks = [...tickIndexes].sort((a, b) => a - b)
+
+    root
+      .selectAll('text.x-tick')
+      .data(ticks)
+      .enter()
+      .append('text')
+      .attr('x', (index: number) => x(index))
+      .attr('y', innerHeight + 16)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#6b7280')
+      .attr('font-size', 10)
+      .text((index: number) => data[index]?.label ?? '')
+  }, [data, color, fill, chartWidth])
+
+  return (
+    <div ref={wrapRef} className="line-chart-wrap">
+      <svg
+        ref={svgRef}
+        className="line-chart"
+        viewBox={`0 0 ${chartWidth} 170`}
+        role="img"
+        aria-label="Strength trend chart"
+      />
+    </div>
+  )
+}
+
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
-}
-
-function getEmotionDisplayName(label: string, language: 'en' | 'fa'): string {
-  const primary = EMOTION_GROUPS.find((group) => group.labelEn === label)
-  if (primary) {
-    return language === 'fa' ? primary.labelFa : primary.labelEn
-  }
-
-  for (const group of EMOTION_GROUPS) {
-    const secondary = group.secondary.find((item) => item.en === label)
-    if (secondary) {
-      return language === 'fa' ? secondary.fa : secondary.en
-    }
-  }
-
-  return label
 }
 
 function App() {
@@ -615,7 +795,8 @@ function App() {
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const [isInstalled, setIsInstalled] = useState(false)
   const [editingHabitId, setEditingHabitId] = useState<string | null>(null)
-  const [insightHabitId, setInsightHabitId] = useState<string | null>(null)
+  const [expandedInsightHabitId, setExpandedInsightHabitId] = useState<string | null>(null)
+  const [insightRange, setInsightRange] = useState<'30d' | 'full'>('30d')
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
   const [cardInputs, setCardInputs] = useState<Record<string, string>>({})
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
@@ -746,42 +927,69 @@ function App() {
   )
 
   const activeHabits = useMemo(() => habits.filter((habit) => !habit.archived), [habits])
+  const activeHabitIds = useMemo(() => new Set(activeHabits.map((habit) => habit.id)), [activeHabits])
 
-  const parsedLogEntries = useMemo(
-    () => logs.map((log) => ({ log, report: parseReport(log.reportValue) })),
-    [logs],
-  )
+  const fullRangeStartDay = useMemo(() => {
+    const createdDayKeys = activeHabits.map((habit) => formatDayKey(new Date(habit.createdAt)))
+    const logDayKeys = logs
+      .filter((log) => activeHabitIds.has(log.habitId))
+      .map((log) => log.dayKey)
+
+    const allKeys = [...createdDayKeys, ...logDayKeys]
+    if (!allKeys.length) {
+      return todayKey
+    }
+
+    const earliest = allKeys.sort((a, b) => a.localeCompare(b))[0]
+    return earliest <= todayKey ? earliest : todayKey
+  }, [activeHabits, logs, activeHabitIds, todayKey])
 
   useEffect(() => {
-    if (insightHabitId) {
+    if (!activeHabits.length) {
+      setExpandedInsightHabitId(null)
       return
     }
-    const firstHabit = activeHabits[0]
-    if (firstHabit) {
-      setInsightHabitId(firstHabit.id)
+
+    const stillExists = activeHabits.some((habit) => habit.id === expandedInsightHabitId)
+    if (!expandedInsightHabitId || !stillExists) {
+      setExpandedInsightHabitId(activeHabits[0].id)
     }
-  }, [activeHabits, insightHabitId])
+  }, [activeHabits, expandedInsightHabitId])
 
-  const selectedInsightHabit = useMemo(
-    () => activeHabits.find((habit) => habit.id === insightHabitId) ?? activeHabits[0] ?? null,
-    [activeHabits, insightHabitId],
-  )
+  const strengthDaySeries = useMemo<ChartPoint[]>(() => {
+    const dayKeys =
+      insightRange === '30d'
+        ? getRecentDayKeys(todayKey, 30)
+        : getDayKeysBetween(fullRangeStartDay, todayKey)
 
-  const allCompletionsChart = useMemo(() => {
-    const dayKeys = getRecentDayKeys(todayKey, 14)
-    return dayKeys.map((dayKey) => ({
-      label: shortDayLabel(dayKey),
-      value: logs.filter((log) => log.dayKey === dayKey).length,
-    }))
-  }, [logs, todayKey])
+    return dayKeys.map((dayKey) => {
+      if (!activeHabits.length) {
+        return { label: shortDayLabel(dayKey), value: 0 }
+      }
 
-  const allCoverageChart = useMemo(() => {
-    const dayKeys = getRecentDayKeys(todayKey, 14)
-    return dayKeys.map((dayKey) => ({
-      label: shortDayLabel(dayKey),
-      value: getAllHabitCoverageForDay(activeHabits, logs, dayKey),
-    }))
-  }, [activeHabits, logs, todayKey])
+      const totalStrength = activeHabits.reduce((sum, habit) => {
+        const streakUnitsAtDayEnd = getConsecutiveSuccessUnits(
+          habit,
+          logs,
+          shiftDayKey(dayKey, 1),
+        )
+        const strengthAtDayEnd = getStrength(getAdaptiveK(habit), streakUnitsAtDayEnd)
+        return sum + strengthAtDayEnd
+      }, 0)
+
+      return {
+        label: shortDayLabel(dayKey),
+        value: totalStrength / activeHabits.length,
+      }
+    })
+  }, [activeHabits, logs, todayKey, insightRange, fullRangeStartDay])
+
+  const totalGrowth = useMemo(() => {
+    if (strengthDaySeries.length < 2) {
+      return 0
+    }
+    return strengthDaySeries[strengthDaySeries.length - 1].value - strengthDaySeries[0].value
+  }, [strengthDaySeries])
 
   const averageStrength = useMemo(() => {
     if (!activeHabits.length) {
@@ -812,92 +1020,6 @@ function App() {
     return { fragile, forming, automatic }
   }, [activeHabits, logs, todayKey])
 
-  const moodDistribution = useMemo(() => {
-    const counts = Array.from({ length: 7 }, () => 0)
-    for (const entry of parsedLogEntries) {
-      if (entry.report.type === 'mood' && entry.report.mood) {
-        const mood = clamp(entry.report.mood, 1, 7)
-        counts[mood - 1] += 1
-      }
-    }
-    return counts
-  }, [parsedLogEntries])
-
-  const emotionDistribution = useMemo(() => {
-    const map = new Map<string, number>()
-    for (const entry of parsedLogEntries) {
-      if (entry.report.type === 'emotion' && entry.report.emotionPrimary) {
-        const key = entry.report.emotionPrimary
-        map.set(key, (map.get(key) ?? 0) + 1)
-      }
-    }
-    return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
-  }, [parsedLogEntries])
-
-  const reportingMix = useMemo(() => {
-    const counts: Record<ReportingType, number> = {
-      button: 0,
-      mood: 0,
-      emotion: 0,
-      text: 0,
-    }
-
-    for (const habit of activeHabits) {
-      counts[habit.reportingType] += 1
-    }
-    return counts
-  }, [activeHabits])
-
-  const habitChart = useMemo<ChartPoint[]>(() => {
-    if (!selectedInsightHabit) {
-      return []
-    }
-
-    if (selectedInsightHabit.desiredFrequency.per === 'day') {
-      const dayKeys = getRecentDayKeys(todayKey, 14)
-      return dayKeys.map((dayKey) => ({
-        label: shortDayLabel(dayKey),
-        value: Math.min(
-          1,
-          countHabitCompletionsForDay(selectedInsightHabit.id, dayKey, logs) /
-            Math.max(1, selectedInsightHabit.desiredFrequency.count),
-        ),
-      }))
-    }
-
-    const weekStarts = getRecentWeekStarts(todayKey, 8)
-    return weekStarts.map((weekStart) => ({
-      label: shortDayLabel(weekStart),
-      value: Math.min(
-        1,
-        countHabitCompletionsForWeek(selectedInsightHabit.id, weekStart, logs) /
-          Math.max(1, selectedInsightHabit.desiredFrequency.count),
-      ),
-    }))
-  }, [selectedInsightHabit, todayKey, logs])
-
-  const selectedHabitTextReports = useMemo(() => {
-    if (!selectedInsightHabit || selectedInsightHabit.reportingType !== 'text') {
-      return [] as ParsedReport[]
-    }
-
-    return parsedLogEntries
-      .filter((entry) => entry.log.habitId === selectedInsightHabit.id)
-      .map((entry) => entry.report)
-      .filter((report) => report.type === 'text' && report.text)
-  }, [selectedInsightHabit, parsedLogEntries])
-
-  const selectedHabitSentiment = useMemo(() => {
-    return selectedHabitTextReports
-      .slice(-10)
-      .map((report) => report.sentiment ?? analyzeSentiment(report.text ?? ''))
-  }, [selectedHabitTextReports])
-
-  const selectedHabitTopWords = useMemo(
-    () => getTopWordsFromReports(selectedHabitTextReports, 8),
-    [selectedHabitTextReports],
-  )
-
   function openAddEditor(): void {
     setEditingHabitId(null)
     setDraft(defaultDraft())
@@ -912,6 +1034,7 @@ function App() {
       desiredCount: habit.desiredFrequency.count,
       desiredPer: habit.desiredFrequency.per,
       difficultyK: habit.difficultyK,
+      decayFactor: habit.decayFactor,
       phase: habit.phase,
       reportingType: habit.reportingType,
     })
@@ -973,6 +1096,7 @@ function App() {
     }
 
     const normalizedK = clamp(draft.difficultyK, 0.01, 0.12)
+    const normalizedDecay = clamp(draft.decayFactor, 0.5, 0.98)
     const normalizedCount = clamp(Math.round(draft.desiredCount), 1, 14)
 
     if (editingHabitId) {
@@ -988,6 +1112,7 @@ function App() {
                   per: draft.desiredPer,
                 },
                 difficultyK: normalizedK,
+                decayFactor: normalizedDecay,
                 phase: draft.phase,
                 reportingType: draft.reportingType,
               }
@@ -1004,6 +1129,7 @@ function App() {
           per: draft.desiredPer,
         },
         difficultyK: normalizedK,
+        decayFactor: normalizedDecay,
         streakBreaks: 0,
         phase: draft.phase,
         reportingType: draft.reportingType,
@@ -1193,6 +1319,7 @@ function App() {
           const adaptiveK = getAdaptiveK(habit)
           const strength = getStrength(adaptiveK, streakUnits)
           const riskTier = getRiskTier(strength)
+          const stage = getStageProgress(strength)
           const period = getPeriodProgress(habit, logs, todayKey)
           const periodLabel =
             language === 'fa'
@@ -1220,6 +1347,20 @@ function App() {
               <p className="status-hint">
                 {getRiskHint(riskTier.title, language)} · {periodLabel}
               </p>
+
+              <div className="stage-progress">
+                <p className="stage-progress-label">
+                  {stage.next
+                    ? tx(
+                        `${getRiskTitle(stage.current, language)} → ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
+                        `${getRiskTitle(stage.current, language)} ← ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
+                      )
+                    : tx('Automatic growth: ', 'رشد خودکار: ') + `${stage.progressPct.toFixed(0)}%`}
+                </p>
+                <div className="stage-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stage.progressPct)}>
+                  <div className="stage-progress-fill" style={{ width: `${stage.progressPct}%` }}></div>
+                </div>
+              </div>
 
               <div className="reporting-box">
                 {habit.reportingType === 'button' && (
@@ -1455,6 +1596,34 @@ function App() {
               k = {draft.difficultyK.toFixed(3)} · {getDifficultyQualifier(draft.difficultyK, language)}
             </p>
 
+            <label className="field-label" htmlFor="habit-decay-factor">
+              {tx('Setback sensitivity (decay factor)', 'حساسیت به عقب‌گرد (ضریب افت)')}
+            </label>
+            <input
+              id="habit-decay-factor"
+              className="range-input"
+              type="range"
+              step="0.01"
+              min={0.5}
+              max={0.98}
+              value={draft.decayFactor}
+              onChange={(event) =>
+                setDraft((prev) => ({
+                  ...prev,
+                  decayFactor: Number(event.target.value) || 0.82,
+                }))
+              }
+            />
+            <p className="difficulty-helper">
+              {tx('Decay factor', 'ضریب افت')} = {draft.decayFactor.toFixed(2)} · {getDecayQualifier(draft.decayFactor, language)}
+            </p>
+            <p className="meta-line">
+              {tx(
+                'Meaning: after a missed period, momentum is multiplied by this value. Lower = harsher setback (good for high-risk habits like smoking).',
+                'معنی: بعد از یک دوره از دست‌رفته، مومنتوم در این مقدار ضرب می‌شود. کمتر = عقب‌گرد شدیدتر (مناسب عادت‌های پرریسک مثل سیگار).',
+              )}
+            </p>
+
             <label className="field-label" htmlFor="habit-report">
               {tx('Reporting type', 'نوع گزارش')}
             </label>
@@ -1529,7 +1698,9 @@ function App() {
                   <p className="strength-strip">{getProgressBarSegments(strength).join(' ')}</p>
                   <div className="metrics-grid">
                     <p>
-                      {tx('Streak units', 'واحدهای تداوم')} <strong>{streakUnits}</strong>
+                      <span title={tx('Momentum after growth and setbacks over time', 'مومنتوم حاصل از رشد و عقب‌گرد در طول زمان')}>
+                        {tx('Momentum units', 'واحدهای مومنتوم')} <strong>{streakUnits.toFixed(1)}</strong>
+                      </span>
                     </p>
                     <p>
                       {tx('Progress', 'پیشرفت')} <strong>{periodLabel}</strong>
@@ -1552,6 +1723,9 @@ function App() {
                   <p className="meta-line">
                     {formatFrequencyLabel(managedHabit)} · {getReportingLabel(managedHabit.reportingType, language)} ·{' '}
                     {tx('Breaks tracked', 'تعداد شکست روند')}: {managedHabit.streakBreaks}
+                  </p>
+                  <p className="meta-line">
+                    {tx('Decay factor', 'ضریب افت')}: {managedHabit.decayFactor.toFixed(2)} · {getDecayQualifier(managedHabit.decayFactor, language)}
                   </p>
                   <p className="compassion-line">💛 {compassionLine}</p>
 
@@ -1654,7 +1828,7 @@ function App() {
         <div className="overlay" role="dialog" aria-modal="true">
           <div className="modal insights-modal">
             <h3>{tx('Insights', 'تحلیل‌ها')}</h3>
-            <p className="meta-line">{tx('Overall trends and individual habit analytics.', 'روندهای کلی و تحلیل تک‌عادت.')}</p>
+            <p className="meta-line">{tx('How your habit system is strengthening over time.', 'روند قوی‌تر شدن سیستم عادت‌های شما در طول زمان.')}</p>
 
             <h4>{tx('All habits', 'همه عادت‌ها')}</h4>
             <div className="insight-kpis">
@@ -1667,133 +1841,162 @@ function App() {
                 <strong>{completedToday}</strong>
               </article>
               <article>
-                <span>{tx('Avg strength', 'میانگین قدرت')}</span>
+                <span>{tx('Avg strength now', 'میانگین قدرت فعلی')}</span>
                 <strong>{averageStrength.toFixed(1)}%</strong>
               </article>
               <article>
-                <span>{tx('Risk mix', 'ترکیب ریسک')}</span>
-                <strong>{riskBuckets.fragile}/{riskBuckets.forming}/{riskBuckets.automatic}</strong>
+                <span>
+                  {insightRange === '30d'
+                    ? tx('Total growth (30d)', 'رشد کل (۳۰ روز)')
+                    : tx('Total growth (full range)', 'رشد کل (بازه کامل)')}
+                </span>
+                <strong>{totalGrowth >= 0 ? '+' : ''}{totalGrowth.toFixed(1)}%</strong>
               </article>
             </div>
 
             <div className="chart-block">
-              <p className="field-label">{tx('Completions per day (14d)', 'تعداد انجام در روز (۱۴ روز)')}</p>
-              <div className="bar-chart">
-                {allCompletionsChart.map((point) => (
-                  <div key={`all-c-${point.label}`} className="bar-col">
-                    <div className="bar-fill" style={{ height: `${Math.max(6, point.value * 12)}%` }}></div>
-                    <span>{point.label}</span>
-                  </div>
-                ))}
+              <div className="chart-block-head">
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={() => setInsightRange((prev) => (prev === '30d' ? 'full' : '30d'))}
+                >
+                  {insightRange === '30d' ? tx('Full range', 'بازه کامل') : tx('Last 30 days', '۳۰ روز اخیر')}
+                </button>
               </div>
+              <StrengthLineChart data={strengthDaySeries} color="#10b981" fill="rgba(16, 185, 129, 0.14)" />
             </div>
 
             <div className="chart-block">
-              <p className="field-label">{tx('Consistency coverage (14d)', 'پوشش پیوستگی (۱۴ روز)')}</p>
-              <div className="bar-chart">
-                {allCoverageChart.map((point) => (
-                  <div key={`all-k-${point.label}`} className="bar-col">
-                    <div className="bar-fill accent" style={{ height: `${Math.max(6, point.value * 100)}%` }}></div>
-                    <span>{point.label}</span>
-                  </div>
-                ))}
-              </div>
+              <p className="field-label">{tx('Risk mix', 'ترکیب ریسک')}</p>
+              <p className="meta-line">
+                {tx('Fragile', 'شکننده')}: {riskBuckets.fragile} · {tx('Forming', 'در حال شکل‌گیری')}: {riskBuckets.forming} · {tx('Automatic', 'خودکار')}: {riskBuckets.automatic}
+              </p>
+              <p className="meta-line">
+                {tx('Goal: move habits from fragile/forming toward automatic by protecting streaks and reducing skips.', 'هدف: انتقال عادت‌ها از شکننده/درحال‌تشکیل به خودکار با حفظ تداوم و کاهش رد کردن.')}
+              </p>
             </div>
 
-            <div className="insight-split">
-              <div>
-                <p className="field-label">{tx('Reporting mix', 'ترکیب گزارش‌دهی')}</p>
-                <ul className="mini-list">
-                  <li>{tx('Button', 'دکمه')}: {reportingMix.button}</li>
-                  <li>{tx('Mood', 'حال')}: {reportingMix.mood}</li>
-                  <li>{tx('Emotion', 'احساس')}: {reportingMix.emotion}</li>
-                  <li>{tx('Text', 'متن')}: {reportingMix.text}</li>
-                </ul>
-              </div>
-              <div>
-                <p className="field-label">{tx('Mood distribution', 'توزیع حال')}</p>
-                <p className="trend-row">
-                  {MOOD_EMOJIS.map((emoji, index) => (
-                    <span
-                      key={`mood-dist-${emoji}`}
-                      title={`${moodDistribution[index]} ${tx('logs', 'ثبت')}`}
+            <h4>{tx('Individual habits', 'عادت‌های فردی')}</h4>
+            <div className="insight-accordion">
+              {activeHabits.map((habit) => {
+                const isOpen = expandedInsightHabitId === habit.id
+                const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey)
+                const adaptiveK = getAdaptiveK(habit)
+                const strength = getStrength(adaptiveK, streakUnits)
+                const risk = 100 - strength
+                const riskTier = getRiskTier(strength)
+                const stage = getStageProgress(strength)
+                const period = getPeriodProgress(habit, logs, todayKey)
+                const periodLabel =
+                  language === 'fa'
+                    ? `${period.done}/${period.target} ${habit.desiredFrequency.per === 'day' ? 'امروز' : 'این هفته'}`
+                    : period.label
+
+                const habitCreatedDay = formatDayKey(new Date(habit.createdAt))
+                const habitLogDayKeys = logs
+                  .filter((log) => log.habitId === habit.id)
+                  .map((log) => log.dayKey)
+                const habitStartDay = [habitCreatedDay, ...habitLogDayKeys]
+                  .sort((a, b) => a.localeCompare(b))[0]
+                const habitSeriesDayKeys =
+                  insightRange === '30d'
+                    ? getRecentDayKeys(todayKey, 30)
+                    : getDayKeysBetween(habitStartDay <= todayKey ? habitStartDay : todayKey, todayKey)
+
+                const habitStrengthSeries = habitSeriesDayKeys.map((dayKey) => {
+                  const streakAtDayEnd = getConsecutiveSuccessUnits(habit, logs, shiftDayKey(dayKey, 1))
+                  return {
+                    label: shortDayLabel(dayKey),
+                    value: getStrength(adaptiveK, streakAtDayEnd),
+                  }
+                })
+
+                const latestSrhi = habit.srhiReports.at(-1)
+                const latestSrhiAverage = latestSrhi ? srhiAverage(latestSrhi.scores) : null
+
+                return (
+                  <article key={`insight-card-${habit.id}`} className="insight-card">
+                    <button
+                      className="insight-card-head"
+                      onClick={() => setExpandedInsightHabitId((prev) => (prev === habit.id ? null : habit.id))}
                     >
-                      {emoji} {moodDistribution[index]}
-                    </span>
-                  ))}
-                </p>
-                {emotionDistribution.length > 0 && (
-                  <>
-                    <p className="field-label">{tx('Top emotions', 'احساسات پرتکرار')}</p>
-                    <ul className="mini-list">
-                      {emotionDistribution.map(([emotion, count]) => (
-                        <li key={`emotion-${emotion}`}>
-                          {getEmotionDisplayName(emotion, language)}: {count}
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </div>
-            </div>
+                      <span>{habit.name}</span>
+                      <span>{isOpen ? '−' : '+'}</span>
+                    </button>
 
-            <h4>{tx('Individual habit', 'هر عادت')}</h4>
-            <select
-              className="text-input"
-              value={selectedInsightHabit?.id ?? ''}
-              onChange={(event) => setInsightHabitId(event.target.value)}
-            >
-              {activeHabits.map((habit) => (
-                <option key={`insight-habit-${habit.id}`} value={habit.id}>
-                  {habit.name}
-                </option>
-              ))}
-            </select>
+                    {isOpen && (
+                      <div className="insight-card-body">
+                        <div className="insight-card-actions">
+                          <button
+                            type="button"
+                            className="secondary-btn"
+                            onClick={() => {
+                              setIsInsightsOpen(false)
+                              openEditEditor(habit)
+                            }}
+                          >
+                            {tx('Edit habit', 'ویرایش عادت')}
+                          </button>
+                        </div>
+                        <p className="meta-line">
+                          {getPhaseLabel(habit.phase, language)} · {formatFrequencyLabel(habit)} · {getReportingLabel(habit.reportingType, language)}
+                        </p>
+                        <p className="status-line">
+                          <span>{riskTier.icon}</span>
+                          <strong>{getRiskTitle(riskTier.title, language)}</strong>
+                        </p>
+                        <p className="status-hint">{getRiskHint(riskTier.title, language)}</p>
 
-            {selectedInsightHabit && (
-              <>
-                <p className="meta-line">
-                  {formatFrequencyLabel(selectedInsightHabit)} · {getReportingLabel(selectedInsightHabit.reportingType, language)}
-                </p>
-                <div className="chart-block">
-                  <p className="field-label">
-                    {selectedInsightHabit.desiredFrequency.per === 'day'
-                      ? tx('Consistency by day (14d)', 'پیوستگی روزانه (۱۴ روز)')
-                      : tx('Consistency by week (8w)', 'پیوستگی هفتگی (۸ هفته)')}
-                  </p>
-                  <div className="bar-chart">
-                    {habitChart.map((point) => (
-                      <div key={`habit-c-${point.label}`} className="bar-col">
-                        <div className="bar-fill success" style={{ height: `${Math.max(6, point.value * 100)}%` }}></div>
-                        <span>{point.label}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                        <div className="stage-progress">
+                          <p className="stage-progress-label">
+                            {stage.next
+                              ? tx(
+                                  `${getRiskTitle(stage.current, language)} → ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
+                                  `${getRiskTitle(stage.current, language)} ← ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
+                                )
+                              : tx('Automatic growth: ', 'رشد خودکار: ') + `${stage.progressPct.toFixed(0)}%`}
+                          </p>
+                          <div className="stage-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stage.progressPct)}>
+                            <div className="stage-progress-fill" style={{ width: `${stage.progressPct}%` }}></div>
+                          </div>
+                        </div>
 
-                {selectedInsightHabit.reportingType === 'text' && (
-                  <div className="sentiment-panel">
-                    <p className="field-label">{tx('Sentiment timeline', 'خط زمان احساس')}</p>
-                    <p className="trend-row">
-                      {selectedHabitSentiment.length
-                        ? selectedHabitSentiment.map((score, index) => (
-                            <span key={`habit-s-${index}`}>{sentimentEmoji(score)}</span>
-                          ))
-                        : tx('No sentiment entries yet', 'هنوز ورودی احساسی ثبت نشده')}
-                    </p>
-                    {selectedHabitTopWords.length > 0 && (
-                      <div className="word-cloud">
-                        {selectedHabitTopWords.map(([word, count]) => (
-                          <span key={`habit-word-${word}`} style={{ fontSize: `${0.75 + count * 0.08}rem` }}>
-                            {word}
-                          </span>
-                        ))}
+                        <div className="metrics-grid">
+                          <p>{tx('Current strength', 'قدرت فعلی')} <strong>{strength.toFixed(1)}%</strong></p>
+                          <p>{tx('Current risk', 'ریسک فعلی')} <strong>{risk.toFixed(1)}%</strong></p>
+                          <p title={tx('Momentum after growth and setbacks over time', 'مومنتوم حاصل از رشد و عقب‌گرد در طول زمان')}>
+                            {tx('Momentum units', 'واحدهای مومنتوم')} <strong>{streakUnits.toFixed(1)}</strong>
+                          </p>
+                          <p>{tx('Progress', 'پیشرفت')} <strong>{periodLabel}</strong></p>
+                          <p>{tx('Learning rate', 'نرخ یادگیری')} <strong>{adaptiveK.toFixed(3)}</strong></p>
+                          <p>{tx('Breaks tracked', 'تعداد شکست روند')} <strong>{habit.streakBreaks}</strong></p>
+                        </div>
+
+                        <div className="chart-block">
+                          <div className="chart-block-head">
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              onClick={() => setInsightRange((prev) => (prev === '30d' ? 'full' : '30d'))}
+                            >
+                              {insightRange === '30d' ? tx('Full range', 'بازه کامل') : tx('Last 30 days', '۳۰ روز اخیر')}
+                            </button>
+                          </div>
+                          <StrengthLineChart data={habitStrengthSeries} color="#3b82f6" fill="rgba(59, 130, 246, 0.12)" />
+                        </div>
+
+                        {latestSrhiAverage !== null && (
+                          <p className="meta-line">
+                            {tx('Latest SRHI', 'آخرین SRHI')}: {latestSrhiAverage.toFixed(2)}
+                          </p>
+                        )}
                       </div>
                     )}
-                  </div>
-                )}
-              </>
-            )}
+                  </article>
+                )
+              })}
+            </div>
 
             <div className="modal-actions">
               <button className="secondary-btn" onClick={() => setIsInsightsOpen(false)}>

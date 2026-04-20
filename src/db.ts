@@ -19,6 +19,7 @@ export interface Habit {
   description: string
   desiredFrequency: DesiredFrequency
   difficultyK: number
+  decayFactor: number
   streakBreaks: number
   phase: HabitPhase
   reportingType: ReportingType
@@ -101,6 +102,14 @@ function normalizeDifficultyK(value: unknown, legacyDifficulty?: unknown): numbe
   return 0.05
 }
 
+function normalizeDecayFactor(value: unknown): number {
+  const direct = asNumber(value, NaN)
+  if (Number.isFinite(direct)) {
+    return clamp(direct, 0.5, 0.98)
+  }
+  return 0.82
+}
+
 function normalizeSrhiReports(value: unknown, legacyScores?: unknown): SrhiReport[] {
   if (Array.isArray(value)) {
     return value
@@ -161,6 +170,7 @@ function normalizeHabit(value: unknown): Habit | null {
     description: typeof habit.description === 'string' ? habit.description : '',
     desiredFrequency: normalizeFrequency(habit.desiredFrequency),
     difficultyK: normalizeDifficultyK(habit.difficultyK, habit.difficulty),
+    decayFactor: normalizeDecayFactor(habit.decayFactor),
     streakBreaks: clamp(Math.round(asNumber(habit.streakBreaks, 0)), 0, 9999),
     phase:
       habit.phase === 'morning' || habit.phase === 'afterWork' || habit.phase === 'beforeBed'
