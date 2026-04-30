@@ -1,4 +1,5 @@
 import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties } from 'react'
 import * as d3 from 'd3'
 import {
   type Habit,
@@ -440,6 +441,12 @@ function getRiskTier(strength: number): {
     className: 'tier-automatic',
     hint: 'Strong autopilot. One off day is usually recoverable.',
   }
+}
+
+function getTierColor(title: string): string {
+  if (title === 'Fragile') return '#ef4444'
+  if (title === 'Forming') return '#f59e0b'
+  return '#22c55e'
 }
 
 function getStageProgress(strength: number): {
@@ -1018,6 +1025,14 @@ function App() {
     }
 
     return { fragile, forming, automatic }
+  }, [activeHabits, logs, todayKey])
+
+  const insightHabitsSorted = useMemo(() => {
+    return [...activeHabits].sort((a, b) => {
+      const strengthA = getStrength(getAdaptiveK(a), getConsecutiveSuccessUnits(a, logs, todayKey))
+      const strengthB = getStrength(getAdaptiveK(b), getConsecutiveSuccessUnits(b, logs, todayKey))
+      return strengthB - strengthA
+    })
   }, [activeHabits, logs, todayKey])
 
   function openAddEditor(): void {
@@ -1879,13 +1894,14 @@ function App() {
 
             <h4>{tx('Individual habits', 'عادت‌های فردی')}</h4>
             <div className="insight-accordion">
-              {activeHabits.map((habit) => {
+              {insightHabitsSorted.map((habit) => {
                 const isOpen = expandedInsightHabitId === habit.id
                 const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey)
                 const adaptiveK = getAdaptiveK(habit)
                 const strength = getStrength(adaptiveK, streakUnits)
                 const risk = 100 - strength
                 const riskTier = getRiskTier(strength)
+                const tierColor = getTierColor(riskTier.title)
                 const stage = getStageProgress(strength)
                 const period = getPeriodProgress(habit, logs, todayKey)
                 const periodLabel =
@@ -1914,15 +1930,29 @@ function App() {
 
                 const latestSrhi = habit.srhiReports.at(-1)
                 const latestSrhiAverage = latestSrhi ? srhiAverage(latestSrhi.scores) : null
+                const insightCardStyle = {
+                  '--insight-progress': `${stage.progressPct.toFixed(1)}%`,
+                  '--insight-phase-color': tierColor,
+                } as CSSProperties
 
                 return (
-                  <article key={`insight-card-${habit.id}`} className="insight-card">
+                  <article
+                    key={`insight-card-${habit.id}`}
+                    className={`insight-card ${riskTier.className}`}
+                    style={insightCardStyle}
+                  >
                     <button
                       className="insight-card-head"
                       onClick={() => setExpandedInsightHabitId((prev) => (prev === habit.id ? null : habit.id))}
                     >
-                      <span>{habit.name}</span>
-                      <span>{isOpen ? '−' : '+'}</span>
+                      <span className="insight-head-main">
+                        <span>{habit.name}</span>
+                        <span className="phase-chip insight-phase-chip">{getPhaseLabel(habit.phase, language)}</span>
+                      </span>
+                      <span className="insight-head-side">
+                        <span className="insight-strength-pill">{strength.toFixed(1)}%</span>
+                        <span>{isOpen ? '−' : '+'}</span>
+                      </span>
                     </button>
 
                     {isOpen && (
@@ -1958,7 +1988,7 @@ function App() {
                               : tx('Automatic growth: ', 'رشد خودکار: ') + `${stage.progressPct.toFixed(0)}%`}
                           </p>
                           <div className="stage-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stage.progressPct)}>
-                            <div className="stage-progress-fill" style={{ width: `${stage.progressPct}%` }}></div>
+                            <div className="stage-progress-fill insight-stage-progress-fill" style={{ width: `${stage.progressPct}%`, background: tierColor }}></div>
                           </div>
                         </div>
 

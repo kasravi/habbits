@@ -513,10 +513,31 @@ body {
   overflow: hidden;
 }
 
+.insight-card.tier-fragile {
+  background: #fff5f5;
+  border-color: #fecaca;
+}
+
+.insight-card.tier-forming {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.insight-card.tier-automatic {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
 .insight-card-head {
   width: 100%;
   border: none;
-  background: transparent;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--insight-phase-color, #60a5fa) 26%, transparent) 0%,
+      color-mix(in srgb, var(--insight-phase-color, #60a5fa) 14%, transparent) var(--insight-progress, 0%),
+      transparent calc(var(--insight-progress, 0%) + 22%)
+    );
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -525,6 +546,36 @@ body {
   font-weight: 600;
   color: #111827;
   cursor: pointer;
+}
+
+.insight-head-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.insight-phase-chip {
+  font-size: 0.7rem;
+  padding: 3px 8px;
+}
+
+.insight-head-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.insight-strength-pill {
+  font-size: 0.75rem;
+  color: #374151;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.insight-stage-progress-fill {
+  transition: width 160ms ease;
 }
 
 .insight-card-body {
