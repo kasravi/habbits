@@ -338,7 +338,12 @@ function shouldShowHabitBySchedule(
   return currentDayOffset >= nextDueDayOffset
 }
 
-function getConsecutiveSuccessUnits(habit: Habit, logs: HabitLog[], todayKey: string): number {
+function getConsecutiveSuccessUnits(
+  habit: Habit,
+  logs: HabitLog[],
+  todayKey: string,
+  options?: { optimisticCurrentDayKey?: string },
+): number {
   const target = Math.max(1, habit.desiredFrequency.count)
   const habitLogs = logs.filter((log) => log.habitId === habit.id)
 
@@ -359,7 +364,11 @@ function getConsecutiveSuccessUnits(habit: Habit, logs: HabitLog[], todayKey: st
 
     while (cursor < endExclusive) {
       const done = countHabitCompletionsForDay(habit.id, cursor, logs)
-      const ratio = clamp(done / target, 0, 1)
+      let ratio = clamp(done / target, 0, 1)
+
+      if (options?.optimisticCurrentDayKey && cursor === options.optimisticCurrentDayKey) {
+        ratio = 1
+      }
 
       if (ratio >= 1) {
         units += 1
@@ -643,9 +652,17 @@ interface StrengthLineChartProps {
   data: ChartPoint[]
   color: string
   fill: string
+  optimisticLastPoint?: boolean
+  optimisticColor?: string
 }
 
-function StrengthLineChart({ data, color, fill }: StrengthLineChartProps) {
+function StrengthLineChart({
+  data,
+  color,
+  fill,
+  optimisticLastPoint = false,
+  optimisticColor = '#60a5fa',
+}: StrengthLineChartProps) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const [chartWidth, setChartWidth] = useState(620)
@@ -742,7 +759,19 @@ function StrengthLineChart({ data, color, fill }: StrengthLineChartProps) {
         .attr('cx', x(data.length - 1))
         .attr('cy', y(data[data.length - 1].value))
         .attr('r', 3.5)
-        .attr('fill', color)
+        .attr('fill', optimisticLastPoint ? optimisticColor : color)
+
+      if (optimisticLastPoint && data.length > 1) {
+        root
+          .append('line')
+          .attr('x1', x(data.length - 2))
+          .attr('y1', y(data[data.length - 2].value))
+          .attr('x2', x(data.length - 1))
+          .attr('y2', y(data[data.length - 1].value))
+          .attr('stroke', optimisticColor)
+          .attr('stroke-width', 2.6)
+          .attr('stroke-linecap', 'round')
+      }
     }
 
     const tickStep = Math.max(1, Math.floor(data.length / 6))
@@ -804,6 +833,7 @@ function App() {
   const [editingHabitId, setEditingHabitId] = useState<string | null>(null)
   const [expandedInsightHabitId, setExpandedInsightHabitId] = useState<string | null>(null)
   const [insightRange, setInsightRange] = useState<'30d' | 'full'>('30d')
+  const [showPreviousDayHabits, setShowPreviousDayHabits] = useState(false)
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
   const [cardInputs, setCardInputs] = useState<Record<string, string>>({})
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
@@ -816,6 +846,7 @@ function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null)
 
   const todayKey = useMemo(() => getEffectiveDayKey(clockNow), [clockNow])
+  const yesterdayKey = useMemo(() => shiftDayKey(todayKey, -1), [todayKey])
   const currentPhase = useMemo(() => getCurrentPhase(clockNow), [clockNow])
   const tx = (en: string, fa: string): string => (language === 'fa' ? fa : en)
 
@@ -928,6 +959,19 @@ function App() {
       })
   }, [habits, logs, currentPhase, todayKey])
 
+  const previousDayHabits = useMemo(() => {
+    return habits
+      .filter((habit) => !habit.archived)
+      .filter((habit) => shouldShowHabitBySchedule(habit, logs, yesterdayKey))
+      .sort((a, b) => {
+        const phaseDiff = PHASE_ORDER.indexOf(b.phase) - PHASE_ORDER.indexOf(a.phase)
+        if (phaseDiff !== 0) {
+          return phaseDiff
+        }
+        return a.createdAt.localeCompare(b.createdAt)
+      })
+  }, [habits, logs, yesterdayKey])
+
   const managedHabit = useMemo(
     () => habits.find((habit) => habit.id === editingHabitId) ?? null,
     [habits, editingHabitId],
@@ -979,6 +1023,7 @@ function App() {
           habit,
           logs,
           shiftDayKey(dayKey, 1),
+          dayKey === todayKey ? { optimisticCurrentDayKey: todayKey } : undefined,
         )
         const strengthAtDayEnd = getStrength(getAdaptiveK(habit), streakUnitsAtDayEnd)
         return sum + strengthAtDayEnd
@@ -1080,14 +1125,16 @@ function App() {
     }
   }
 
-  function completeHabit(habit: Habit, report: ParsedReport): void {
-    incrementStreakBreakIfNeeded(habit)
+  function completeHabit(habit: Habit, report: ParsedReport, targetDayKey = todayKey): void {
+    if (targetDayKey === todayKey) {
+      incrementStreakBreakIfNeeded(habit)
+    }
 
     setLogs((previous) => {
       const entry: HabitLog = {
         id: crypto.randomUUID(),
         habitId: habit.id,
-        dayKey: todayKey,
+        dayKey: targetDayKey,
         completedAt: new Date().toISOString(),
         reportValue: JSON.stringify(report),
       }
@@ -1286,6 +1333,181 @@ function App() {
     return <main className="app-shell">{tx('Loading your habits…', 'در حال بارگذاری عادت‌ها…')}</main>
   }
 
+  function renderHabitCard(habit: Habit, targetDayKey: string, isBackfill = false) {
+    const streakUnits = getConsecutiveSuccessUnits(habit, logs, targetDayKey)
+    const adaptiveK = getAdaptiveK(habit)
+    const strength = getStrength(adaptiveK, streakUnits)
+    const riskTier = getRiskTier(strength)
+    const stage = getStageProgress(strength)
+    const period = getPeriodProgress(habit, logs, targetDayKey)
+    const isTodayCard = targetDayKey === todayKey
+    const periodLabel =
+      habit.desiredFrequency.per === 'day'
+        ? language === 'fa'
+          ? `${period.done}/${period.target} ${isTodayCard ? 'امروز' : 'دیروز'}`
+          : `${period.done}/${period.target} ${isTodayCard ? 'today' : 'yesterday'}`
+        : language === 'fa'
+          ? `${period.done}/${period.target} ${isTodayCard ? 'این هفته' : 'هفته قبل'}`
+          : `${period.done}/${period.target} ${isTodayCard ? 'this week' : 'last week'}`
+
+    return (
+      <article
+        key={`${habit.id}-${targetDayKey}`}
+        className={`habit-card ${riskTier.className}`}
+        onPointerDown={!isBackfill ? () => startCardLongPress(habit) : undefined}
+        onPointerUp={!isBackfill ? clearCardLongPress : undefined}
+        onPointerLeave={!isBackfill ? clearCardLongPress : undefined}
+        onPointerCancel={!isBackfill ? clearCardLongPress : undefined}
+      >
+        <div className="habit-header">
+          <h2>{habit.name}</h2>
+          <span className="phase-chip">{getPhaseLabel(habit.phase, language)}</span>
+        </div>
+
+        <p className="status-line">
+          <span>{riskTier.icon}</span>
+          <strong>{getRiskTitle(riskTier.title, language)}</strong>
+        </p>
+        <p className="status-hint">
+          {getRiskHint(riskTier.title, language)} · {periodLabel}
+        </p>
+
+        <div className="stage-progress">
+          <p className="stage-progress-label">
+            {stage.next
+              ? tx(
+                  `${getRiskTitle(stage.current, language)} → ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
+                  `${getRiskTitle(stage.current, language)} ← ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
+                )
+              : tx('Automatic growth: ', 'رشد خودکار: ') + `${stage.progressPct.toFixed(0)}%`}
+          </p>
+          <div className="stage-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stage.progressPct)}>
+            <div className="stage-progress-fill" style={{ width: `${stage.progressPct}%` }}></div>
+          </div>
+        </div>
+
+        <div className="reporting-box">
+          {habit.reportingType === 'button' && (
+            <button className="primary-btn" onClick={() => completeHabit(habit, { type: 'button' }, targetDayKey)}>
+              {tx('I did it', 'انجام شد')} ({period.remaining} {tx('left', 'باقی‌مانده')})
+            </button>
+          )}
+
+          {habit.reportingType === 'mood' && (
+            <>
+              <label className="field-label">{tx('Pick your mood', 'حال خودت را انتخاب کن')}</label>
+              <div className="emoji-row">
+                {MOOD_EMOJIS.map((emoji, index) => (
+                  <button
+                    key={`${habit.id}-${targetDayKey}-mood-${emoji}`}
+                    className="emoji-btn"
+                    onClick={() => completeHabit(habit, { type: 'mood', mood: index + 1 }, targetDayKey)}
+                    title={`Mood ${index + 1}`}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {habit.reportingType === 'emotion' && (
+            <>
+              <label className="field-label">{tx('Primary emotion', 'احساس اصلی')}</label>
+              <div className="emotion-grid">
+                {EMOTION_GROUPS.map((group) => (
+                  <button
+                    key={`${habit.id}-${targetDayKey}-${group.key}`}
+                    className="chip-btn emotion-primary"
+                    style={{ borderColor: group.color }}
+                    onClick={() =>
+                      setEmotionPrimary((prev) => ({
+                        ...prev,
+                        [habit.id]: group.key,
+                      }))
+                    }
+                  >
+                    {language === 'fa' ? group.labelFa : group.labelEn}
+                  </button>
+                ))}
+              </div>
+
+              {emotionPrimary[habit.id] && (
+                <>
+                  <label className="field-label">{tx('Secondary emotion', 'احساس ثانویه')}</label>
+                  <div className="emotion-grid">
+                    {EMOTION_GROUPS.find((group) => group.key === emotionPrimary[habit.id])?.secondary.map(
+                      (secondary) => (
+                        <button
+                          key={`${habit.id}-${targetDayKey}-${secondary.en}`}
+                          className="chip-btn"
+                          onClick={() =>
+                            completeHabit(
+                              habit,
+                              {
+                                type: 'emotion',
+                                emotionPrimary:
+                                  EMOTION_GROUPS.find((group) => group.key === emotionPrimary[habit.id])
+                                    ?.labelEn ?? '',
+                                emotionSecondary: secondary.en,
+                              },
+                              targetDayKey,
+                            )
+                          }
+                        >
+                          {language === 'fa' ? secondary.fa : secondary.en}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {habit.reportingType === 'text' && (
+            <>
+              <label className="field-label" htmlFor={`text-${habit.id}-${targetDayKey}`}>
+                {tx('Journal note', 'یادداشت روزانه')}
+              </label>
+              <textarea
+                id={`text-${habit.id}-${targetDayKey}`}
+                className="text-input text-area"
+                placeholder={
+                  isTodayCard
+                    ? tx('Write a few lines about this habit today…', 'چند خط درباره این عادت امروز بنویس…')
+                    : tx('Write a few lines about this habit yesterday…', 'چند خط درباره این عادت دیروز بنویس…')
+                }
+                value={cardInputs[habit.id] ?? ''}
+                onChange={(event) => updateCardInput(habit.id, event.target.value)}
+              />
+              <button
+                className="primary-btn"
+                onClick={() => {
+                  const text = (cardInputs[habit.id] ?? '').trim()
+                  if (!text) {
+                    return
+                  }
+                  completeHabit(
+                    habit,
+                    {
+                      type: 'text',
+                      text,
+                      sentiment: analyzeSentiment(text),
+                    },
+                    targetDayKey,
+                  )
+                }}
+              >
+                {tx('Save journal entry', 'ثبت یادداشت')}
+              </button>
+            </>
+          )}
+        </div>
+      </article>
+    )
+  }
+
   return (
     <main className="app-shell" dir={language === 'fa' ? 'rtl' : 'ltr'}>
       <header className="top-bar">
@@ -1329,166 +1551,35 @@ function App() {
           </article>
         )}
 
-        {visibleHabits.map((habit) => {
-          const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey)
-          const adaptiveK = getAdaptiveK(habit)
-          const strength = getStrength(adaptiveK, streakUnits)
-          const riskTier = getRiskTier(strength)
-          const stage = getStageProgress(strength)
-          const period = getPeriodProgress(habit, logs, todayKey)
-          const periodLabel =
-            language === 'fa'
-              ? `${period.done}/${period.target} ${habit.desiredFrequency.per === 'day' ? 'امروز' : 'این هفته'}`
-              : period.label
+        {visibleHabits.map((habit) => renderHabitCard(habit, todayKey))}
 
-          return (
-            <article
-              key={habit.id}
-              className={`habit-card ${riskTier.className}`}
-              onPointerDown={() => startCardLongPress(habit)}
-              onPointerUp={clearCardLongPress}
-              onPointerLeave={clearCardLongPress}
-              onPointerCancel={clearCardLongPress}
+        <div className="backfill-section">
+          <div className="feed-separator">
+            <span>{tx('Missed yesterday?', 'دیروز جا موند؟')}</span>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => setShowPreviousDayHabits((prev) => !prev)}
             >
-              <div className="habit-header">
-                <h2>{habit.name}</h2>
-                <span className="phase-chip">{getPhaseLabel(habit.phase, language)}</span>
-              </div>
+              {showPreviousDayHabits
+                ? tx('Hide previous day', 'مخفی‌کردن دیروز')
+                : tx('Load previous day habits', 'نمایش عادت‌های دیروز')}
+            </button>
+          </div>
 
-              <p className="status-line">
-                <span>{riskTier.icon}</span>
-                <strong>{getRiskTitle(riskTier.title, language)}</strong>
-              </p>
-              <p className="status-hint">
-                {getRiskHint(riskTier.title, language)} · {periodLabel}
-              </p>
-
-              <div className="stage-progress">
-                <p className="stage-progress-label">
-                  {stage.next
-                    ? tx(
-                        `${getRiskTitle(stage.current, language)} → ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
-                        `${getRiskTitle(stage.current, language)} ← ${getRiskTitle(stage.next, language)}: ${stage.progressPct.toFixed(0)}%`,
-                      )
-                    : tx('Automatic growth: ', 'رشد خودکار: ') + `${stage.progressPct.toFixed(0)}%`}
-                </p>
-                <div className="stage-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stage.progressPct)}>
-                  <div className="stage-progress-fill" style={{ width: `${stage.progressPct}%` }}></div>
-                </div>
-              </div>
-
-              <div className="reporting-box">
-                {habit.reportingType === 'button' && (
-                  <button
-                    className="primary-btn"
-                    onClick={() => completeHabit(habit, { type: 'button' })}
-                  >
-                    {tx('I did it', 'انجام شد')} ({period.remaining} {tx('left', 'باقی‌مانده')})
-                  </button>
-                )}
-
-                {habit.reportingType === 'mood' && (
-                  <>
-                    <label className="field-label">{tx('Pick your mood', 'حال خودت را انتخاب کن')}</label>
-                    <div className="emoji-row">
-                      {MOOD_EMOJIS.map((emoji, index) => (
-                        <button
-                          key={`${habit.id}-mood-${emoji}`}
-                          className="emoji-btn"
-                          onClick={() => completeHabit(habit, { type: 'mood', mood: index + 1 })}
-                          title={`Mood ${index + 1}`}
-                        >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
-
-                {habit.reportingType === 'emotion' && (
-                  <>
-                    <label className="field-label">{tx('Primary emotion', 'احساس اصلی')}</label>
-                    <div className="emotion-grid">
-                      {EMOTION_GROUPS.map((group) => (
-                        <button
-                          key={`${habit.id}-${group.key}`}
-                          className="chip-btn emotion-primary"
-                          style={{ borderColor: group.color }}
-                          onClick={() =>
-                            setEmotionPrimary((prev) => ({
-                              ...prev,
-                              [habit.id]: group.key,
-                            }))
-                          }
-                        >
-                          {language === 'fa' ? group.labelFa : group.labelEn}
-                        </button>
-                      ))}
-                    </div>
-
-                    {emotionPrimary[habit.id] && (
-                      <>
-                        <label className="field-label">{tx('Secondary emotion', 'احساس ثانویه')}</label>
-                        <div className="emotion-grid">
-                          {EMOTION_GROUPS.find((group) => group.key === emotionPrimary[habit.id])?.secondary.map(
-                            (secondary) => (
-                              <button
-                                key={`${habit.id}-${secondary.en}`}
-                                className="chip-btn"
-                                onClick={() =>
-                                  completeHabit(habit, {
-                                    type: 'emotion',
-                                    emotionPrimary:
-                                      EMOTION_GROUPS.find((group) => group.key === emotionPrimary[habit.id])
-                                        ?.labelEn ?? '',
-                                    emotionSecondary: secondary.en,
-                                  })
-                                }
-                              >
-                                {language === 'fa' ? secondary.fa : secondary.en}
-                              </button>
-                            ),
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </>
-                )}
-
-                {habit.reportingType === 'text' && (
-                  <>
-                    <label className="field-label" htmlFor={`text-${habit.id}`}>
-                      {tx('Journal note', 'یادداشت روزانه')}
-                    </label>
-                    <textarea
-                      id={`text-${habit.id}`}
-                      className="text-input text-area"
-                      placeholder={tx('Write a few lines about this habit today…', 'چند خط درباره این عادت امروز بنویس…')}
-                      value={cardInputs[habit.id] ?? ''}
-                      onChange={(event) => updateCardInput(habit.id, event.target.value)}
-                    />
-                    <button
-                      className="primary-btn"
-                      onClick={() => {
-                        const text = (cardInputs[habit.id] ?? '').trim()
-                        if (!text) {
-                          return
-                        }
-                        completeHabit(habit, {
-                          type: 'text',
-                          text,
-                          sentiment: analyzeSentiment(text),
-                        })
-                      }}
-                    >
-                      {tx('Save journal entry', 'ثبت یادداشت')}
-                    </button>
-                  </>
-                )}
-              </div>
-            </article>
-          )
-        })}
+          {showPreviousDayHabits && (
+            <div className="backfill-list">
+              {previousDayHabits.length === 0 ? (
+                <article className="empty-state">
+                  <h2>{tx('Nothing pending from yesterday ✨', 'از دیروز موردی باقی نمانده ✨')}</h2>
+                  <p>{tx('You are caught up.', 'همه چیز به‌روز است.')}</p>
+                </article>
+              ) : (
+                previousDayHabits.map((habit) => renderHabitCard(habit, yesterdayKey, true))
+              )}
+            </div>
+          )}
+        </div>
       </section>
 
       <input
@@ -1879,7 +1970,13 @@ function App() {
                   {insightRange === '30d' ? tx('Full range', 'بازه کامل') : tx('Last 30 days', '۳۰ روز اخیر')}
                 </button>
               </div>
-              <StrengthLineChart data={strengthDaySeries} color="#10b981" fill="rgba(16, 185, 129, 0.14)" />
+              <StrengthLineChart
+                data={strengthDaySeries}
+                color="#10b981"
+                fill="rgba(16, 185, 129, 0.14)"
+                optimisticLastPoint
+                optimisticColor="#3b82f6"
+              />
             </div>
 
             <div className="chart-block">
@@ -1921,7 +2018,12 @@ function App() {
                     : getDayKeysBetween(habitStartDay <= todayKey ? habitStartDay : todayKey, todayKey)
 
                 const habitStrengthSeries = habitSeriesDayKeys.map((dayKey) => {
-                  const streakAtDayEnd = getConsecutiveSuccessUnits(habit, logs, shiftDayKey(dayKey, 1))
+                  const streakAtDayEnd = getConsecutiveSuccessUnits(
+                    habit,
+                    logs,
+                    shiftDayKey(dayKey, 1),
+                    dayKey === todayKey ? { optimisticCurrentDayKey: todayKey } : undefined,
+                  )
                   return {
                     label: shortDayLabel(dayKey),
                     value: getStrength(adaptiveK, streakAtDayEnd),
@@ -2013,7 +2115,13 @@ function App() {
                               {insightRange === '30d' ? tx('Full range', 'بازه کامل') : tx('Last 30 days', '۳۰ روز اخیر')}
                             </button>
                           </div>
-                          <StrengthLineChart data={habitStrengthSeries} color="#3b82f6" fill="rgba(59, 130, 246, 0.12)" />
+                          <StrengthLineChart
+                            data={habitStrengthSeries}
+                            color="#3b82f6"
+                            fill="rgba(59, 130, 246, 0.12)"
+                            optimisticLastPoint
+                            optimisticColor="#10b981"
+                          />
                         </div>
 
                         {latestSrhiAverage !== null && (
