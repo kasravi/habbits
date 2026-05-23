@@ -14,16 +14,21 @@ import {
 } from './db'
 import emotionsData from '../emotions.json'
 
-const PHASE_ORDER: HabitPhase[] = ['morning', 'afterWork', 'beforeBed']
+type TimedPhase = Exclude<HabitPhase, 'anytime'>
+
+const TIMED_PHASE_ORDER: TimedPhase[] = ['morning', 'afterWork', 'beforeBed']
+const PHASE_OPTIONS: HabitPhase[] = [...TIMED_PHASE_ORDER, 'anytime']
 const PHASE_LABELS: Record<HabitPhase, string> = {
   morning: 'Morning',
   afterWork: 'After work',
   beforeBed: 'Before bed',
+  anytime: 'Anytime',
 }
 const PHASE_LABELS_FA: Record<HabitPhase, string> = {
   morning: 'صبح',
   afterWork: 'بعد از کار',
   beforeBed: 'قبل خواب',
+  anytime: 'هر زمان',
 }
 
 const REPORTING_LABELS: Record<ReportingType, string> = {
@@ -213,7 +218,7 @@ function formatDayKey(date: Date): string {
 
 function getEffectiveDayKey(now = new Date()): string {
   const shifted = new Date(now)
-  shifted.setHours(shifted.getHours() - 3)
+  shifted.setHours(shifted.getHours() - 2)
   return formatDayKey(shifted)
 }
 
@@ -228,11 +233,11 @@ function shiftDayKey(dayKey: string, deltaDays: number): string {
   return formatDayKey(date)
 }
 
-function getCurrentPhase(now = new Date()): HabitPhase {
+function getCurrentPhase(now = new Date()): TimedPhase {
   const hour = now.getHours()
   const minute = now.getMinutes()
 
-  if (hour < 3) {
+  if (hour < 2) {
     return 'beforeBed'
   }
 
@@ -245,6 +250,25 @@ function getCurrentPhase(now = new Date()): HabitPhase {
   }
 
   return 'beforeBed'
+}
+
+function getPhaseSortIndex(phase: HabitPhase): number {
+  if (phase === 'anytime') {
+    return 99
+  }
+  return TIMED_PHASE_ORDER.indexOf(phase)
+}
+
+function isAnytimeUrgent(habit: Habit, todayKey: string, currentPhase: TimedPhase): boolean {
+  if (habit.phase !== 'anytime') {
+    return false
+  }
+
+  if (habit.desiredFrequency.per === 'day') {
+    return currentPhase === 'beforeBed'
+  }
+
+  return getWeekDayOffset(todayKey) >= 5
 }
 
 function getWeekStart(dayKey: string): string {
@@ -656,6 +680,12 @@ interface StrengthLineChartProps {
   optimisticColor?: string
 }
 
+interface MiniBarDatum {
+  label: string
+  value: number
+  color?: string
+}
+
 function StrengthLineChart({
   data,
   color,
@@ -808,6 +838,90 @@ function StrengthLineChart({
   )
 }
 
+function D3VerticalBars({ data, fallbackColor = '#60a5fa' }: { data: MiniBarDatum[]; fallbackColor?: string }) {
+  const svgRef = useRef<SVGSVGElement | null>(null)
+
+  useEffect(() => {
+    const svgElement = svgRef.current
+    if (!svgElement) {
+      return
+    }
+
+    const width = 620
+    const height = 190
+    const margin = { top: 10, right: 10, bottom: 44, left: 26 }
+    const innerWidth = width - margin.left - margin.right
+    const innerHeight = height - margin.top - margin.bottom
+
+    const svg = d3.select(svgElement)
+    svg.selectAll('*').remove()
+
+    const root = svg
+      .append('g')
+      .attr('transform', `translate(${margin.left},${margin.top})`)
+
+    const maxValue = Math.max(1, ...data.map((entry) => entry.value))
+    const x = d3
+      .scaleBand<string>()
+      .domain(data.map((entry) => entry.label))
+      .range([0, innerWidth])
+      .padding(0.22)
+    const y = d3
+      .scaleLinear()
+      .domain([0, maxValue])
+      .range([innerHeight, 0])
+
+    root
+      .selectAll('line.grid')
+      .data([0, maxValue])
+      .enter()
+      .append('line')
+      .attr('x1', 0)
+      .attr('x2', innerWidth)
+      .attr('y1', (d: number) => y(d))
+      .attr('y2', (d: number) => y(d))
+      .attr('stroke', '#e5e7eb')
+      .attr('stroke-width', 1)
+
+    data.forEach((entry) => {
+      const xPos = x(entry.label) ?? 0
+      const barWidth = x.bandwidth()
+      const barHeight = innerHeight - y(entry.value)
+
+      root
+        .append('rect')
+        .attr('x', xPos)
+        .attr('y', y(entry.value))
+        .attr('width', barWidth)
+        .attr('height', barHeight)
+        .attr('rx', 4)
+        .attr('fill', entry.color ?? fallbackColor)
+
+      root
+        .append('text')
+        .attr('x', xPos + barWidth / 2)
+        .attr('y', y(entry.value) - 4)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#6b7280')
+        .attr('font-size', 10)
+        .text(entry.value)
+
+      root
+        .append('text')
+        .attr('x', xPos + barWidth / 2)
+        .attr('y', innerHeight + 14)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#4b5563')
+        .attr('font-size', 10)
+        .text(entry.label)
+    })
+
+    svg.attr('viewBox', `0 0 ${width} ${height}`)
+  }, [data, fallbackColor])
+
+  return <svg ref={svgRef} className="line-chart" role="img" aria-label="Vertical bar chart" />
+}
+
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
@@ -834,6 +948,7 @@ function App() {
   const [expandedInsightHabitId, setExpandedInsightHabitId] = useState<string | null>(null)
   const [insightRange, setInsightRange] = useState<'30d' | 'full'>('30d')
   const [showPreviousDayHabits, setShowPreviousDayHabits] = useState(false)
+  const [showAnytimeHabits, setShowAnytimeHabits] = useState(false)
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
   const [cardInputs, setCardInputs] = useState<Record<string, string>>({})
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
@@ -945,13 +1060,13 @@ function App() {
   }, [logs, todayKey])
 
   const visibleHabits = useMemo(() => {
-    const currentPhaseIndex = PHASE_ORDER.indexOf(currentPhase)
+    const currentPhaseIndex = TIMED_PHASE_ORDER.indexOf(currentPhase)
 
     return habits
-      .filter((habit) => !habit.archived && PHASE_ORDER.indexOf(habit.phase) <= currentPhaseIndex)
+      .filter((habit) => !habit.archived && habit.phase !== 'anytime' && getPhaseSortIndex(habit.phase) <= currentPhaseIndex)
       .filter((habit) => shouldShowHabitBySchedule(habit, logs, todayKey))
       .sort((a, b) => {
-        const phaseDiff = PHASE_ORDER.indexOf(b.phase) - PHASE_ORDER.indexOf(a.phase)
+        const phaseDiff = getPhaseSortIndex(b.phase) - getPhaseSortIndex(a.phase)
         if (phaseDiff !== 0) {
           return phaseDiff
         }
@@ -959,12 +1074,30 @@ function App() {
       })
   }, [habits, logs, currentPhase, todayKey])
 
+  const anytimeHabits = useMemo(() => {
+    return habits
+      .filter((habit) => !habit.archived && habit.phase === 'anytime')
+      .filter((habit) => !getPeriodProgress(habit, logs, todayKey).completed)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }, [habits, logs, todayKey])
+
+  const hasUrgentAnytimeHabits = useMemo(
+    () => anytimeHabits.some((habit) => isAnytimeUrgent(habit, todayKey, currentPhase)),
+    [anytimeHabits, todayKey, currentPhase],
+  )
+
+  useEffect(() => {
+    if (hasUrgentAnytimeHabits) {
+      setShowAnytimeHabits(true)
+    }
+  }, [hasUrgentAnytimeHabits])
+
   const previousDayHabits = useMemo(() => {
     return habits
       .filter((habit) => !habit.archived)
       .filter((habit) => shouldShowHabitBySchedule(habit, logs, yesterdayKey))
       .sort((a, b) => {
-        const phaseDiff = PHASE_ORDER.indexOf(b.phase) - PHASE_ORDER.indexOf(a.phase)
+        const phaseDiff = getPhaseSortIndex(b.phase) - getPhaseSortIndex(a.phase)
         if (phaseDiff !== 0) {
           return phaseDiff
         }
@@ -1553,6 +1686,37 @@ function App() {
 
         {visibleHabits.map((habit) => renderHabitCard(habit, todayKey))}
 
+        <div className="anytime-section">
+          <div className="feed-separator">
+            <span>
+              {tx('Anytime habits', 'عادت‌های هرزمان')}
+              {hasUrgentAnytimeHabits ? ` · ${tx('deadline approaching', 'نزدیک به پایان بازه')}` : ''}
+            </span>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => setShowAnytimeHabits((prev) => !prev)}
+            >
+              {showAnytimeHabits
+                ? tx('Hide anytime habits', 'مخفی‌کردن عادت‌های هرزمان')
+                : tx('Show anytime habits', 'نمایش عادت‌های هرزمان')}
+            </button>
+          </div>
+
+          {showAnytimeHabits && (
+            <div className="anytime-list">
+              {anytimeHabits.length === 0 ? (
+                <article className="empty-state">
+                  <h2>{tx('Anytime list is clear ✨', 'لیست هرزمان خلوت شد ✨')}</h2>
+                  <p>{tx('No pending anytime habits right now.', 'فعلاً عادت هرزمانیِ باقی‌مانده‌ای نداری.')}</p>
+                </article>
+              ) : (
+                anytimeHabits.map((habit) => renderHabitCard(habit, todayKey))
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="backfill-section">
           <div className="feed-separator">
             <span>{tx('Missed yesterday?', 'دیروز جا موند؟')}</span>
@@ -1673,7 +1837,7 @@ function App() {
                 setDraft((prev) => ({ ...prev, phase: event.target.value as HabitPhase }))
               }
             >
-              {PHASE_ORDER.map((phase) => (
+              {PHASE_OPTIONS.map((phase) => (
                 <option key={phase} value={phase}>
                   {getPhaseLabel(phase, language)}
                 </option>
@@ -2032,6 +2196,81 @@ function App() {
 
                 const latestSrhi = habit.srhiReports.at(-1)
                 const latestSrhiAverage = latestSrhi ? srhiAverage(latestSrhi.scores) : null
+                const habitReports = logs
+                  .filter((log) => log.habitId === habit.id)
+                  .map((log) => parseReport(log.reportValue))
+
+                const moodCounts = Array.from({ length: MOOD_EMOJIS.length }, () => 0)
+                for (const report of habitReports) {
+                  if (report.type === 'mood' && report.mood) {
+                    const moodIndex = Math.max(1, Math.min(MOOD_EMOJIS.length, report.mood)) - 1
+                    moodCounts[moodIndex] += 1
+                  }
+                }
+                const moodData: MiniBarDatum[] = MOOD_EMOJIS.map((emoji, index) => ({
+                  label: emoji,
+                  value: moodCounts[index],
+                }))
+
+                const emotionData: MiniBarDatum[] = EMOTION_GROUPS.map((group) => {
+                  const primaryReports = habitReports.filter(
+                    (report) => report.type === 'emotion' && report.emotionPrimary === group.labelEn,
+                  )
+
+                  return {
+                    label: language === 'fa' ? group.labelFa : group.labelEn,
+                    value: primaryReports.length,
+                    color: group.color,
+                  }
+                })
+
+                const textReports = habitReports
+                  .filter((report) => report.type === 'text' && report.text)
+                  .map((report) => ({
+                    text: report.text ?? '',
+                    sentiment: report.sentiment ?? analyzeSentiment(report.text ?? ''),
+                  }))
+
+                const wordStats = new Map<string, { count: number; sentimentSum: number }>()
+                for (const report of textReports) {
+                  const words = report.text
+                    .toLowerCase()
+                    .replace(/[^a-z\s]/g, ' ')
+                    .split(/\s+/)
+                    .filter((word) => word.length > 3 && !STOP_WORDS.has(word))
+
+                  for (const word of words) {
+                    const entry = wordStats.get(word) ?? { count: 0, sentimentSum: 0 }
+                    entry.count += 1
+                    const lexicalHint = POSITIVE_WORDS.has(word)
+                      ? 0.5
+                      : NEGATIVE_WORDS.has(word)
+                        ? -0.5
+                        : 0
+                    entry.sentimentSum += report.sentiment + lexicalHint
+                    wordStats.set(word, entry)
+                  }
+                }
+
+                const topWords = [...wordStats.entries()]
+                  .map(([word, stats]) => ({
+                    word,
+                    count: stats.count,
+                    avgSentiment: stats.sentimentSum / Math.max(1, stats.count),
+                  }))
+                  .sort((a, b) => b.count - a.count)
+                  .slice(0, 8)
+
+                const termsData: MiniBarDatum[] = topWords.map((entry) => ({
+                  label: entry.word,
+                  value: entry.count,
+                  color:
+                    entry.avgSentiment > 0.18
+                      ? '#34d399'
+                      : entry.avgSentiment < -0.18
+                        ? '#f87171'
+                        : '#60a5fa',
+                }))
                 const insightCardStyle = {
                   '--insight-progress': `${stage.progressPct.toFixed(1)}%`,
                   '--insight-phase-color': tierColor,
@@ -2123,6 +2362,41 @@ function App() {
                             optimisticColor="#10b981"
                           />
                         </div>
+
+                        {habit.reportingType === 'mood' && moodData.length > 0 && (
+                          <div className="chart-block discrete-block">
+                            <D3VerticalBars data={moodData} fallbackColor="#60a5fa" />
+                          </div>
+                        )}
+
+                        {habit.reportingType === 'emotion' && emotionData.length > 0 && (
+                          <div className="chart-block discrete-block">
+                            <D3VerticalBars data={emotionData} fallbackColor="#a78bfa" />
+                          </div>
+                        )}
+
+                        {habit.reportingType === 'text' && termsData.length > 0 && (
+                          <div className="chart-block discrete-block">
+                            <div className="insight-terms-text">
+                              {termsData.map((entry) => {
+                                const intensity = entry.value / Math.max(1, termsData[0]?.value ?? 1)
+                                return (
+                                  <span
+                                    key={`${habit.id}-term-${entry.label}`}
+                                    style={{
+                                      fontSize: `${0.82 + intensity * 0.56}rem`,
+                                      color: entry.color ?? '#4b5563',
+                                      opacity: 0.42 + intensity * 0.58,
+                                    }}
+                                    title={`${entry.label} · ${entry.value}`}
+                                  >
+                                    {entry.label}
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
 
                         {latestSrhiAverage !== null && (
                           <p className="meta-line">

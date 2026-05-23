@@ -1,4 +1,4 @@
-const CACHE_NAME = 'habbits-pwa-v3.1'
+const CACHE_NAME = 'habbits-pwa-v3.2'
 
 function getBasePath() {
   const scope = self.registration?.scope

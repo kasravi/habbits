@@ -589,6 +589,17 @@ body {
   margin-bottom: 4px;
 }
 
+.discrete-block {
+  margin-top: 6px;
+}
+
+.insight-terms-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: baseline;
+}
+
 .insight-split {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -637,6 +648,13 @@ body {
   gap: 10px;
 }
 
+.anytime-section {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .feed-separator {
   display: flex;
   align-items: center;
@@ -652,6 +670,12 @@ body {
 }
 
 .backfill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.anytime-list {
   display: flex;
   flex-direction: column;
   gap: 10px;

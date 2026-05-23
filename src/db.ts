@@ -1,4 +1,4 @@
-export type HabitPhase = 'morning' | 'afterWork' | 'beforeBed'
+export type HabitPhase = 'morning' | 'afterWork' | 'beforeBed' | 'anytime'
 export type ReportingType = 'button' | 'text' | 'emotion' | 'mood'
 export type FrequencyPeriod = 'day' | 'week'
 
@@ -173,7 +173,10 @@ function normalizeHabit(value: unknown): Habit | null {
     decayFactor: normalizeDecayFactor(habit.decayFactor),
     streakBreaks: clamp(Math.round(asNumber(habit.streakBreaks, 0)), 0, 9999),
     phase:
-      habit.phase === 'morning' || habit.phase === 'afterWork' || habit.phase === 'beforeBed'
+      habit.phase === 'morning' ||
+      habit.phase === 'afterWork' ||
+      habit.phase === 'beforeBed' ||
+      habit.phase === 'anytime'
         ? habit.phase
         : 'morning',
     reportingType:
