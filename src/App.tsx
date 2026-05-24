@@ -949,6 +949,7 @@ function App() {
   const [insightRange, setInsightRange] = useState<'30d' | 'full'>('30d')
   const [showPreviousDayHabits, setShowPreviousDayHabits] = useState(false)
   const [showAnytimeHabits, setShowAnytimeHabits] = useState(false)
+  const [showSecondaryAnalytics, setShowSecondaryAnalytics] = useState<Record<string, boolean>>({})
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
   const [cardInputs, setCardInputs] = useState<Record<string, string>>({})
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
@@ -2271,6 +2272,11 @@ function App() {
                         ? '#f87171'
                         : '#60a5fa',
                 }))
+                const hasSecondaryAnalytics =
+                  (habit.reportingType === 'mood' && moodData.some((entry) => entry.value > 0)) ||
+                  (habit.reportingType === 'emotion' && emotionData.some((entry) => entry.value > 0)) ||
+                  (habit.reportingType === 'text' && termsData.length > 0)
+                const secondaryVisible = Boolean(showSecondaryAnalytics[habit.id])
                 const insightCardStyle = {
                   '--insight-progress': `${stage.progressPct.toFixed(1)}%`,
                   '--insight-phase-color': tierColor,
@@ -2309,6 +2315,23 @@ function App() {
                           >
                             {tx('Edit habit', 'ویرایش عادت')}
                           </button>
+                          {hasSecondaryAnalytics && (
+                            <button
+                              type="button"
+                              className="secondary-btn"
+                              style={{ marginLeft: '8px' }}
+                              onClick={() =>
+                                setShowSecondaryAnalytics((prev) => ({
+                                  ...prev,
+                                  [habit.id]: !prev[habit.id],
+                                }))
+                              }
+                            >
+                              {secondaryVisible
+                                ? tx('Hide details', 'پنهان‌کردن جزئیات')
+                                : tx('Show details', 'نمایش جزئیات')}
+                            </button>
+                          )}
                         </div>
                         <p className="meta-line">
                           {getPhaseLabel(habit.phase, language)} · {formatFrequencyLabel(habit)} · {getReportingLabel(habit.reportingType, language)}
@@ -2363,19 +2386,19 @@ function App() {
                           />
                         </div>
 
-                        {habit.reportingType === 'mood' && moodData.length > 0 && (
+                        {secondaryVisible && habit.reportingType === 'mood' && moodData.length > 0 && (
                           <div className="chart-block discrete-block">
                             <D3VerticalBars data={moodData} fallbackColor="#60a5fa" />
                           </div>
                         )}
 
-                        {habit.reportingType === 'emotion' && emotionData.length > 0 && (
+                        {secondaryVisible && habit.reportingType === 'emotion' && emotionData.length > 0 && (
                           <div className="chart-block discrete-block">
                             <D3VerticalBars data={emotionData} fallbackColor="#a78bfa" />
                           </div>
                         )}
 
-                        {habit.reportingType === 'text' && termsData.length > 0 && (
+                        {secondaryVisible && habit.reportingType === 'text' && termsData.length > 0 && (
                           <div className="chart-block discrete-block">
                             <div className="insight-terms-text">
                               {termsData.map((entry) => {
