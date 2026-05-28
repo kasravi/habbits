@@ -938,6 +938,7 @@ function App() {
   const [habits, setHabits] = useState<Habit[]>([])
   const [logs, setLogs] = useState<HabitLog[]>([])
   const [isLoaded, setIsLoaded] = useState(false)
+  const [canAutoSave, setCanAutoSave] = useState(false)
   const [rewardMessage, setRewardMessage] = useState('')
   const [isEditorOpen, setIsEditorOpen] = useState(false)
   const [isInsightsOpen, setIsInsightsOpen] = useState(false)
@@ -1017,12 +1018,14 @@ function App() {
         }
         setHabits(state.habits)
         setLogs(state.logs)
+        setCanAutoSave(true)
         setIsLoaded(true)
       })
       .catch(() => {
         if (!mounted) {
           return
         }
+        setCanAutoSave(false)
         setIsLoaded(true)
       })
 
@@ -1032,11 +1035,11 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!isLoaded) {
+    if (!isLoaded || !canAutoSave) {
       return
     }
     void savePersistedState({ habits, logs })
-  }, [habits, logs, isLoaded])
+  }, [habits, logs, isLoaded, canAutoSave])
 
   useEffect(() => {
     const timer = window.setInterval(() => {

@@ -45,6 +45,7 @@ const DB_NAME = 'habit-feed-db'
 const DB_VERSION = 1
 const STORE_NAME = 'kv'
 const APP_STATE_KEY = 'habit-feed-state'
+const LOCAL_BACKUP_KEY = 'habit-feed-state-backup-v1'
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -233,27 +234,91 @@ function normalizePersistedState(value: unknown): PersistedState {
   }
 }
 
-export async function loadPersistedState(): Promise<PersistedState> {
-  const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly')
-    const store = tx.objectStore(STORE_NAME)
-    const request = store.get(APP_STATE_KEY)
+function hasPersistedData(state: PersistedState): boolean {
+  return state.habits.length > 0 || state.logs.length > 0
+}
 
-    request.onerror = () => reject(request.error)
-    request.onsuccess = () => {
-      const value = request.result as unknown
-      if (!value) {
-        resolve({ habits: [], logs: [] })
-        return
-      }
+function readLocalBackup(): PersistedState | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
 
-      resolve(normalizePersistedState(value))
+  try {
+    const raw = window.localStorage.getItem(LOCAL_BACKUP_KEY)
+    if (!raw) {
+      return null
     }
-  })
+
+    const parsed = JSON.parse(raw) as unknown
+    const candidate =
+      parsed && typeof parsed === 'object' && 'state' in (parsed as Record<string, unknown>)
+        ? (parsed as { state: unknown }).state
+        : parsed
+
+    const normalized = normalizePersistedState(candidate)
+    return hasPersistedData(normalized) ? normalized : null
+  } catch {
+    return null
+  }
+}
+
+function writeLocalBackup(state: PersistedState): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(
+      LOCAL_BACKUP_KEY,
+      JSON.stringify({
+        version: 1,
+        savedAt: new Date().toISOString(),
+        state,
+      }),
+    )
+  } catch {
+    // Ignore backup write failures.
+  }
+}
+
+export async function loadPersistedState(): Promise<PersistedState> {
+  const backup = readLocalBackup()
+
+  try {
+    const db = await openDb()
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly')
+      const store = tx.objectStore(STORE_NAME)
+      const request = store.get(APP_STATE_KEY)
+
+      request.onerror = () => reject(request.error)
+      request.onsuccess = () => {
+        const value = request.result as unknown
+        if (!value) {
+          resolve(backup ?? { habits: [], logs: [] })
+          return
+        }
+
+        const normalized = normalizePersistedState(value)
+        if (hasPersistedData(normalized)) {
+          writeLocalBackup(normalized)
+          resolve(normalized)
+          return
+        }
+
+        resolve(backup ?? normalized)
+      }
+    })
+  } catch (error) {
+    if (backup) {
+      return backup
+    }
+    throw error
+  }
 }
 
 export async function savePersistedState(state: PersistedState): Promise<void> {
+  writeLocalBackup(state)
   const db = await openDb()
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite')
