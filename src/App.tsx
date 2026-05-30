@@ -108,6 +108,8 @@ const CARD_COMPASSION_FA = [
   'بردهای کوچک هم می‌تونن زندگی‌ساز باشن.',
 ]
 
+const HAZE_UI_STORAGE_KEY = 'habit-feed-haze-ui-v1'
+
 const SRHI_TRIGGER_STRENGTH = 35
 const MOOD_EMOJIS = ['😖', '🙁', '😕', '😐', '🙂', '😄', '🤩']
 
@@ -253,6 +255,46 @@ interface MediaGalleryEntry {
   }
 }
 
+interface HazeUiState {
+  confirmedStartDayKey: string | null
+  dismissedStartDayKey: string | null
+  dismissedUntilDayKey: string | null
+  exitPromptSnoozedUntilDayKey: string | null
+}
+
+interface DayCompletionStat {
+  dayKey: string
+  ratio: number
+  baseline: number | null
+  trailing3Average: number
+  dropFromBaseline: number | null
+  isLow: boolean
+}
+
+interface HazePeriod {
+  startDayKey: string
+  endDayKey: string
+  baseline: number
+  averageRatio: number
+  lowDayCount: number
+  severity: 'light' | 'heavy'
+  recovered: boolean
+  recoveryDayKey: string | null
+}
+
+interface HazeChartRange {
+  startIndex: number
+  endIndex: number
+  tone: 'detected' | 'confirmed' | 'recovered'
+}
+
+interface HazeRecoverySignal {
+  recovered: boolean
+  baseline: number | null
+  threshold: number | null
+  recentAverage: number | null
+}
+
 function defaultDraft(): HabitDraft {
   return {
     name: '',
@@ -279,9 +321,54 @@ function getEffectiveDayKey(now = new Date()): string {
   return formatDayKey(shifted)
 }
 
+function defaultHazeUiState(): HazeUiState {
+  return {
+    confirmedStartDayKey: null,
+    dismissedStartDayKey: null,
+    dismissedUntilDayKey: null,
+    exitPromptSnoozedUntilDayKey: null,
+  }
+}
+
+function loadHazeUiState(): HazeUiState {
+  if (typeof window === 'undefined') {
+    return defaultHazeUiState()
+  }
+
+  try {
+    const raw = window.localStorage.getItem(HAZE_UI_STORAGE_KEY)
+    if (!raw) {
+      return defaultHazeUiState()
+    }
+
+    const parsed = JSON.parse(raw) as Partial<HazeUiState>
+    return {
+      confirmedStartDayKey:
+        typeof parsed.confirmedStartDayKey === 'string' ? parsed.confirmedStartDayKey : null,
+      dismissedStartDayKey:
+        typeof parsed.dismissedStartDayKey === 'string' ? parsed.dismissedStartDayKey : null,
+      dismissedUntilDayKey:
+        typeof parsed.dismissedUntilDayKey === 'string' ? parsed.dismissedUntilDayKey : null,
+      exitPromptSnoozedUntilDayKey:
+        typeof parsed.exitPromptSnoozedUntilDayKey === 'string'
+          ? parsed.exitPromptSnoozedUntilDayKey
+          : null,
+    }
+  } catch {
+    return defaultHazeUiState()
+  }
+}
+
 function dayKeyToDate(dayKey: string): Date {
   const [year, month, day] = dayKey.split('-').map(Number)
   return new Date(year, month - 1, day)
+}
+
+function average(values: number[]): number {
+  if (!values.length) {
+    return 0
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length
 }
 
 function shiftDayKey(dayKey: string, deltaDays: number): string {
@@ -500,7 +587,7 @@ function getConsecutiveSuccessUnits(
   habit: Habit,
   logs: HabitLog[],
   todayKey: string,
-  options?: { optimisticCurrentDayKey?: string },
+  options?: { optimisticCurrentDayKey?: string; hazeCompassionByDay?: Record<string, number> },
 ): number {
   const target = Math.max(1, habit.desiredFrequency.count)
   const habitLogs = logs.filter((log) => log.habitId === habit.id)
@@ -531,9 +618,13 @@ function getConsecutiveSuccessUnits(
       if (ratio >= 1) {
         units += 1
       } else if (ratio > 0) {
-        units = units * partialDecay + ratio
+        const compassion = clamp(options?.hazeCompassionByDay?.[cursor] ?? 0, 0, 1)
+        const adjustedPartialDecay = partialDecay + (1 - partialDecay) * compassion * 0.45
+        units = units * adjustedPartialDecay + ratio
       } else {
-        units *= momentumDecay
+        const compassion = clamp(options?.hazeCompassionByDay?.[cursor] ?? 0, 0, 1)
+        const adjustedDecay = momentumDecay + (1 - momentumDecay) * compassion * 0.7
+        units *= adjustedDecay
       }
 
       cursor = shiftDayKey(cursor, 1)
@@ -553,13 +644,19 @@ function getConsecutiveSuccessUnits(
   while (cursor < endExclusive) {
     const done = countHabitCompletionsForWeek(habit.id, cursor, logs)
     const ratio = clamp(done / target, 0, 1)
+    const weekCompassion = Math.max(
+      0,
+      ...Array.from({ length: 7 }, (_, index) => options?.hazeCompassionByDay?.[shiftDayKey(cursor, index)] ?? 0),
+    )
 
     if (ratio >= 1) {
       units += 1
     } else if (ratio > 0) {
-      units = units * partialDecay + ratio
+      const adjustedPartialDecay = partialDecay + (1 - partialDecay) * weekCompassion * 0.45
+      units = units * adjustedPartialDecay + ratio
     } else {
-      units *= momentumDecay
+      const adjustedDecay = momentumDecay + (1 - momentumDecay) * weekCompassion * 0.7
+      units *= adjustedDecay
     }
 
     cursor = shiftDayKey(cursor, 7)
@@ -987,6 +1084,7 @@ function shortDayLabel(dayKey: string): string {
 interface ChartPoint {
   label: string
   value: number
+  dayKey?: string
 }
 
 interface StrengthLineChartProps {
@@ -995,6 +1093,8 @@ interface StrengthLineChartProps {
   fill: string
   optimisticLastPoint?: boolean
   optimisticColor?: string
+  hazeRanges?: HazeChartRange[]
+  showUnderFogDetails?: boolean
 }
 
 interface MiniBarDatum {
@@ -1009,6 +1109,8 @@ function StrengthLineChart({
   fill,
   optimisticLastPoint = false,
   optimisticColor = '#60a5fa',
+  hazeRanges = [],
+  showUnderFogDetails = false,
 }: StrengthLineChartProps) {
   const svgRef = useRef<SVGSVGElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -1047,6 +1149,8 @@ function StrengthLineChart({
     const svg = d3.select(svgElement)
     svg.selectAll('*').remove()
 
+    const defs = svg.append('defs')
+
     const root = svg
       .append('g')
       .attr('transform', `translate(${margin.left},${margin.top})`)
@@ -1073,6 +1177,35 @@ function StrengthLineChart({
       .attr('stroke', '#e5e7eb')
       .attr('stroke-width', 1)
 
+    const rangeStartX = (index: number) => {
+      if (data.length <= 1) {
+        return 0
+      }
+      return index <= 0 ? 0 : x(index - 0.5)
+    }
+
+    const rangeEndX = (index: number) => {
+      if (data.length <= 1) {
+        return innerWidth
+      }
+      return index >= data.length - 1 ? innerWidth : x(index + 0.5)
+    }
+
+    const sortedRanges = [...hazeRanges].sort((a, b) => a.startIndex - b.startIndex)
+    const visibleSegments: Array<{ startX: number; endX: number }> = []
+    let cursorX = 0
+    for (const range of sortedRanges) {
+      const startX = rangeStartX(range.startIndex)
+      const endX = rangeEndX(range.endIndex)
+      if (startX > cursorX) {
+        visibleSegments.push({ startX: cursorX, endX: startX })
+      }
+      cursorX = Math.max(cursorX, endX)
+    }
+    if (cursorX < innerWidth) {
+      visibleSegments.push({ startX: cursorX, endX: innerWidth })
+    }
+
     const area = d3
       .area<ChartPoint>()
       .x((_: ChartPoint, index: number) => x(index))
@@ -1086,39 +1219,166 @@ function StrengthLineChart({
       .y((d: ChartPoint) => y(d.value))
       .curve(d3.curveMonotoneX)
 
-    if (data.length > 0) {
-      root
-        .append('path')
-        .datum(data)
-        .attr('fill', fill)
-        .attr('d', area)
+    const areaPath = data.length > 0 ? area(data) : null
+    const linePath = data.length > 0 ? line(data) : null
 
-      root
-        .append('path')
-        .datum(data)
-        .attr('fill', 'none')
-        .attr('stroke', color)
-        .attr('stroke-width', 2)
-        .attr('d', line)
-
-      root
-        .append('circle')
-        .attr('cx', x(data.length - 1))
-        .attr('cy', y(data[data.length - 1].value))
-        .attr('r', 3.5)
-        .attr('fill', optimisticLastPoint ? optimisticColor : color)
-
-      if (optimisticLastPoint && data.length > 1) {
-        root
-          .append('line')
-          .attr('x1', x(data.length - 2))
-          .attr('y1', y(data[data.length - 2].value))
-          .attr('x2', x(data.length - 1))
-          .attr('y2', y(data[data.length - 1].value))
-          .attr('stroke', optimisticColor)
-          .attr('stroke-width', 2.6)
-          .attr('stroke-linecap', 'round')
+    const appendSeries = (
+      selection: d3.Selection<SVGGElement, unknown, null, undefined>,
+      options?: { hideLastPoint?: boolean },
+    ) => {
+      if (areaPath) {
+        selection
+          .append('path')
+          .attr('fill', fill)
+          .attr('d', areaPath)
       }
+
+      if (linePath) {
+        selection
+          .append('path')
+          .attr('fill', 'none')
+          .attr('stroke', color)
+          .attr('stroke-width', 2)
+          .attr('d', linePath)
+      }
+
+      if (!options?.hideLastPoint) {
+        selection
+          .append('circle')
+          .attr('cx', x(data.length - 1))
+          .attr('cy', y(data[data.length - 1].value))
+          .attr('r', 3.5)
+          .attr('fill', optimisticLastPoint ? optimisticColor : color)
+
+        if (optimisticLastPoint && data.length > 1) {
+          selection
+            .append('line')
+            .attr('x1', x(data.length - 2))
+            .attr('y1', y(data[data.length - 2].value))
+            .attr('x2', x(data.length - 1))
+            .attr('y2', y(data[data.length - 1].value))
+            .attr('stroke', optimisticColor)
+            .attr('stroke-width', 2.6)
+            .attr('stroke-linecap', 'round')
+        }
+      }
+    }
+
+    if (data.length > 0) {
+      const lastPointInsideFog = sortedRanges.some(
+        (range) => data.length - 1 >= range.startIndex && data.length - 1 <= range.endIndex,
+      )
+
+      if (showUnderFogDetails || !sortedRanges.length) {
+        appendSeries(root)
+      } else {
+        visibleSegments.forEach((segment, segmentIndex) => {
+          const clipId = `visible-clip-${segmentIndex}-${Math.random().toString(36).slice(2, 9)}`
+          defs
+            .append('clipPath')
+            .attr('id', clipId)
+            .append('rect')
+            .attr('x', segment.startX)
+            .attr('y', -8)
+            .attr('width', Math.max(0, segment.endX - segment.startX))
+            .attr('height', innerHeight + 16)
+
+          appendSeries(
+            root.append('g').attr('clip-path', `url(#${clipId})`),
+            { hideLastPoint: lastPointInsideFog },
+          )
+        })
+
+        if (!visibleSegments.length && !lastPointInsideFog) {
+          appendSeries(root)
+        }
+      }
+
+      sortedRanges.forEach((range) => {
+        const x0 = rangeStartX(range.startIndex)
+        const x1 = rangeEndX(range.endIndex)
+        const width = Math.max(10, x1 - x0)
+        const gradientId = `fog-gradient-${Math.random().toString(36).slice(2, 9)}`
+        const hazeRgb = '231, 254, 134'
+
+        const fogTopOpacity =
+          range.tone === 'confirmed' ? 0.62 : range.tone === 'recovered' ? 0.42 : 0.5
+        const fogBottomOpacity =
+          range.tone === 'confirmed' ? 0.28 : range.tone === 'recovered' ? 0.18 : 0.22
+
+        const fogGradient = defs
+          .append('linearGradient')
+          .attr('id', gradientId)
+          .attr('x1', '0%')
+          .attr('y1', '0%')
+          .attr('x2', '0%')
+          .attr('y2', '100%')
+
+        fogGradient
+          .append('stop')
+          .attr('offset', '0%')
+          .attr('stop-color', `rgba(${hazeRgb}, ${fogTopOpacity})`)
+
+        fogGradient
+          .append('stop')
+          .attr('offset', '100%')
+          .attr('stop-color', `rgba(${hazeRgb}, ${fogBottomOpacity})`)
+
+        root
+          .append('rect')
+          .attr('x', x0)
+          .attr('y', 0)
+          .attr('width', width)
+          .attr('height', innerHeight)
+          .attr('rx', 10)
+          .attr('fill', `url(#${gradientId})`)
+          .attr('stroke', 'rgba(231, 254, 134, 0.52)')
+          .attr('stroke-width', 1)
+
+        if (showUnderFogDetails) {
+          root
+            .append('rect')
+            .attr('x', x0)
+            .attr('y', 0)
+            .attr('width', width)
+            .attr('height', innerHeight)
+            .attr('rx', 10)
+            .attr('fill', 'rgba(231, 254, 134, 0.16)')
+        }
+
+        const cloudGroup = root.append('g').attr('opacity', range.tone === 'confirmed' ? 0.9 : 0.75)
+        const cloudCenterX = x0 + width / 2
+        cloudGroup
+          .append('ellipse')
+          .attr('cx', cloudCenterX)
+          .attr('cy', 18)
+          .attr('rx', Math.min(28, width * 0.18))
+          .attr('ry', 9)
+          .attr('fill', 'rgba(231,254,134,0.88)')
+        cloudGroup
+          .append('ellipse')
+          .attr('cx', cloudCenterX - Math.min(18, width * 0.12))
+          .attr('cy', 20)
+          .attr('rx', Math.min(16, width * 0.12))
+          .attr('ry', 7)
+          .attr('fill', 'rgba(239,255,180,0.82)')
+        cloudGroup
+          .append('ellipse')
+          .attr('cx', cloudCenterX + Math.min(18, width * 0.12))
+          .attr('cy', 20)
+          .attr('rx', Math.min(15, width * 0.11))
+          .attr('ry', 6.5)
+          .attr('fill', 'rgba(247,255,212,0.8)')
+
+        root
+          .append('text')
+          .attr('x', x0 + width / 2)
+          .attr('y', 21)
+          .attr('text-anchor', 'middle')
+          .attr('fill', '#64748b')
+          .attr('font-size', 11)
+          .text('☁︎')
+      })
     }
 
     const tickStep = Math.max(1, Math.floor(data.length / 6))
@@ -1140,7 +1400,7 @@ function StrengthLineChart({
       .attr('fill', '#6b7280')
       .attr('font-size', 10)
       .text((index: number) => data[index]?.label ?? '')
-  }, [data, color, fill, chartWidth])
+  }, [data, color, fill, chartWidth, hazeRanges, optimisticLastPoint, optimisticColor, showUnderFogDetails])
 
   return (
     <div ref={wrapRef} className="line-chart-wrap">
@@ -1239,6 +1499,271 @@ function D3VerticalBars({ data, fallbackColor = '#60a5fa' }: { data: MiniBarDatu
   return <svg ref={svgRef} className="line-chart" role="img" aria-label="Vertical bar chart" />
 }
 
+function getDailyHabitCompletionRatio(habit: Habit, logs: HabitLog[], dayKey: string): number {
+  const target = Math.max(1, habit.desiredFrequency.count)
+
+  if (habit.desiredFrequency.per === 'day') {
+    const done = countHabitCompletionsForDay(habit.id, dayKey, logs)
+    return clamp(done / target, 0, 1)
+  }
+
+  const weekStart = getWeekStart(dayKey)
+  const done = countHabitCompletionsForWeek(habit.id, weekStart, logs)
+  const expectedByToday = Math.max(1, Math.ceil(((getWeekDayOffset(dayKey) + 1) * target) / 7))
+  return clamp(done / expectedByToday, 0, 1)
+}
+
+function buildDayCompletionStats(
+  habits: Habit[],
+  logs: HabitLog[],
+  startDayKey: string,
+  endDayKey: string,
+): DayCompletionStat[] {
+  const dayKeys = getDayKeysBetween(startDayKey, endDayKey)
+  const ratios = dayKeys.map((dayKey) => {
+    if (!habits.length) {
+      return 0
+    }
+
+    const habitRatios = habits.map((habit) => getDailyHabitCompletionRatio(habit, logs, dayKey))
+    return average(habitRatios)
+  })
+
+  return dayKeys.map((dayKey, index) => {
+    const windowStart = Math.max(0, index - 10)
+    const baselineWindow = ratios.slice(windowStart, index)
+    const baseline = baselineWindow.length >= 6 ? average(baselineWindow) : null
+    const trailing3 = average(ratios.slice(Math.max(0, index - 2), index + 1))
+    const dropFromBaseline = baseline === null ? null : baseline - ratios[index]
+    const isLow =
+      baseline !== null &&
+      baseline >= 0.42 &&
+      ((ratios[index] <= 0.58 && (dropFromBaseline ?? 0) >= 0.14) ||
+        (trailing3 <= 0.62 && baseline - trailing3 >= 0.12))
+
+    return {
+      dayKey,
+      ratio: ratios[index],
+      baseline,
+      trailing3Average: trailing3,
+      dropFromBaseline,
+      isLow,
+    }
+  })
+}
+
+function detectHazePeriods(stats: DayCompletionStat[]): HazePeriod[] {
+  const periods: HazePeriod[] = []
+  let index = 0
+
+  while (index < stats.length) {
+    const stat = stats[index]
+    const baseline = stat.baseline
+
+    const startsHaze =
+      baseline !== null &&
+      baseline >= 0.48 &&
+      stat.trailing3Average <= Math.max(0.56, baseline - 0.12) &&
+      stat.ratio <= Math.max(0.68, baseline - 0.08)
+
+    if (!startsHaze) {
+      index += 1
+      continue
+    }
+
+    const anchorBaseline = baseline
+    const startIndex = index
+    let lastHazeIndex = index
+    let lowDayCount = 0
+    let recoveryStreak = 0
+    let hasMeaningfulDip = false
+    let troughRatio = stat.ratio
+    let troughTrailing3 = stat.trailing3Average
+    let recoveryStartIndex = -1
+
+    for (let cursor = index; cursor < stats.length; cursor += 1) {
+      const entry = stats[cursor]
+      troughRatio = Math.min(troughRatio, entry.ratio)
+      troughTrailing3 = Math.min(troughTrailing3, entry.trailing3Average)
+
+      const trough = Math.min(troughRatio, troughTrailing3)
+      const recoveryThreshold = Math.max(0.45, trough + (anchorBaseline - trough) * 0.55)
+      const stillMeaningfullyLow =
+        entry.trailing3Average <= Math.max(recoveryThreshold - 0.04, trough + 0.06) ||
+        entry.ratio <= Math.max(recoveryThreshold - 0.08, trough + 0.1)
+
+      if (stillMeaningfullyLow) {
+        lowDayCount += 1
+        recoveryStreak = 0
+        recoveryStartIndex = -1
+        lastHazeIndex = cursor
+        if (
+          entry.trailing3Average <= anchorBaseline - 0.14 ||
+          entry.ratio <= anchorBaseline - 0.18
+        ) {
+          hasMeaningfulDip = true
+        }
+        continue
+      }
+
+      const recoveryEnough =
+        entry.trailing3Average >= recoveryThreshold &&
+        entry.ratio >= Math.max(0.4, recoveryThreshold - 0.05)
+
+      if (lowDayCount >= 3 && recoveryEnough) {
+        if (recoveryStreak === 0) {
+          recoveryStartIndex = cursor
+        }
+        recoveryStreak += 1
+        if (recoveryStreak >= 4) {
+          break
+        }
+      } else {
+        recoveryStreak = 0
+        recoveryStartIndex = -1
+        lastHazeIndex = cursor
+      }
+    }
+
+    const slice = stats.slice(startIndex, lastHazeIndex + 1)
+    const averageRatio = average(slice.map((entry) => entry.ratio))
+    const minTrailing3 = Math.min(...slice.map((entry) => entry.trailing3Average))
+    const recovered = recoveryStreak >= 4 && recoveryStartIndex !== -1
+    const recoveryDayKey = recovered ? stats[recoveryStartIndex]?.dayKey ?? null : null
+
+    if (
+      slice.length >= 4 &&
+      lowDayCount >= 3 &&
+      hasMeaningfulDip &&
+      averageRatio <= anchorBaseline - 0.12 &&
+      minTrailing3 <= anchorBaseline - 0.12
+    ) {
+      periods.push({
+        startDayKey: slice[0].dayKey,
+        endDayKey: slice[slice.length - 1].dayKey,
+        baseline: anchorBaseline,
+        averageRatio,
+        lowDayCount,
+        severity: anchorBaseline - averageRatio >= 0.24 ? 'heavy' : 'light',
+        recovered,
+        recoveryDayKey,
+      })
+      index = recovered && recoveryStartIndex !== -1 ? recoveryStartIndex + recoveryStreak : lastHazeIndex + 1
+      continue
+    }
+
+    index = startIndex + 1
+  }
+
+  return periods
+}
+
+function getHazeRecoverySignal(
+  stats: DayCompletionStat[],
+  confirmedStartDayKey: string | null,
+): HazeRecoverySignal {
+  if (!confirmedStartDayKey) {
+    return {
+      recovered: false,
+      baseline: null,
+      threshold: null,
+      recentAverage: null,
+    }
+  }
+
+  const startIndex = stats.findIndex((entry) => entry.dayKey === confirmedStartDayKey)
+  if (startIndex === -1) {
+    return {
+      recovered: false,
+      baseline: null,
+      threshold: null,
+      recentAverage: null,
+    }
+  }
+
+  const baselineWindow = stats.slice(Math.max(0, startIndex - 10), startIndex).map((entry) => entry.ratio)
+  const baseline = baselineWindow.length >= 4 ? average(baselineWindow) : null
+  const recentWindow = stats.slice(Math.max(startIndex, stats.length - 3))
+  if (recentWindow.length < 3 || baseline === null) {
+    return {
+      recovered: false,
+      baseline,
+      threshold: baseline === null ? null : Math.max(0.62, baseline - 0.05),
+      recentAverage: recentWindow.length ? average(recentWindow.map((entry) => entry.ratio)) : null,
+    }
+  }
+
+  const threshold = Math.max(0.62, baseline - 0.05)
+  const recentAverage = average(recentWindow.map((entry) => entry.ratio))
+  const recovered =
+    recentAverage >= threshold - 0.03 &&
+    recentWindow.filter((entry) => entry.ratio >= threshold).length >= 2
+
+  return {
+    recovered,
+    baseline,
+    threshold,
+    recentAverage,
+  }
+}
+
+function buildHazeCompassionByDay(
+  periods: HazePeriod[],
+  confirmedStartDayKey: string | null,
+  todayKey: string,
+): Record<string, number> {
+  const compassionByDay: Record<string, number> = {}
+
+  for (const period of periods) {
+    const periodCompassion = period.recovered ? 0.78 : period.severity === 'heavy' ? 0.54 : 0.4
+    for (const dayKey of getDayKeysBetween(period.startDayKey, period.endDayKey)) {
+      compassionByDay[dayKey] = Math.max(compassionByDay[dayKey] ?? 0, periodCompassion)
+    }
+  }
+
+  if (confirmedStartDayKey) {
+    for (const dayKey of getDayKeysBetween(confirmedStartDayKey, todayKey)) {
+      compassionByDay[dayKey] = Math.max(compassionByDay[dayKey] ?? 0, 0.62)
+    }
+  }
+
+  return compassionByDay
+}
+
+function mapHazeRangesToChart(
+  data: ChartPoint[],
+  periods: HazePeriod[],
+  confirmedStartDayKey: string | null,
+): HazeChartRange[] {
+  const dayIndex = new Map<string, number>()
+  data.forEach((entry, index) => {
+    if (entry.dayKey) {
+      dayIndex.set(entry.dayKey, index)
+    }
+  })
+
+  return periods
+    .map((period) => {
+      const startIndex = dayIndex.get(period.startDayKey)
+      const endIndex = dayIndex.get(period.endDayKey)
+      if (typeof startIndex !== 'number' || typeof endIndex !== 'number') {
+        return null
+      }
+
+      return {
+        startIndex,
+        endIndex,
+        tone:
+          !period.recovered && confirmedStartDayKey === period.startDayKey
+            ? 'confirmed'
+            : period.recovered
+              ? 'recovered'
+              : 'detected',
+      } as HazeChartRange
+    })
+    .filter((entry): entry is HazeChartRange => Boolean(entry))
+}
+
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
@@ -1281,11 +1806,13 @@ function App() {
   const [editingHabitId, setEditingHabitId] = useState<string | null>(null)
   const [expandedInsightHabitId, setExpandedInsightHabitId] = useState<string | null>(null)
   const [insightRange, setInsightRange] = useState<'30d' | 'full'>('30d')
+  const [showUnderFogDetails, setShowUnderFogDetails] = useState(false)
   const [showPreviousDayHabits, setShowPreviousDayHabits] = useState(false)
   const [showAnytimeHabits, setShowAnytimeHabits] = useState(false)
   const [showSecondaryAnalytics, setShowSecondaryAnalytics] = useState<Record<string, boolean>>({})
   const [selectedMediaLogIds, setSelectedMediaLogIds] = useState<Record<string, string>>({})
   const [galleryHabitId, setGalleryHabitId] = useState<string | null>(null)
+  const [hazeUiState, setHazeUiState] = useState<HazeUiState>(() => loadHazeUiState())
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
   const [cardInputs, setCardInputs] = useState<Record<string, string>>({})
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
@@ -1312,6 +1839,14 @@ function App() {
     document.documentElement.lang = language
     document.documentElement.dir = language === 'fa' ? 'rtl' : 'ltr'
   }, [language])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    window.localStorage.setItem(HAZE_UI_STORAGE_KEY, JSON.stringify(hazeUiState))
+  }, [hazeUiState])
 
   useEffect(() => {
     saveDriveBackupSettings(driveBackupSettings)
@@ -1626,6 +2161,67 @@ function App() {
     }
   }, [activeHabits, expandedInsightHabitId])
 
+  const hazeDayStats = useMemo(() => {
+    if (!activeHabits.length) {
+      return []
+    }
+
+    return buildDayCompletionStats(activeHabits, logs, fullRangeStartDay, todayKey)
+  }, [activeHabits, logs, fullRangeStartDay, todayKey])
+
+  const detectedHazePeriods = useMemo(() => detectHazePeriods(hazeDayStats), [hazeDayStats])
+
+  const currentDetectedHaze = useMemo(() => {
+    const latest = detectedHazePeriods[detectedHazePeriods.length - 1]
+    if (!latest) {
+      return null
+    }
+
+    return shiftDayKey(latest.endDayKey, 1) >= todayKey ? latest : null
+  }, [detectedHazePeriods, todayKey])
+
+  const effectiveConfirmedHazeStartDayKey = useMemo(() => {
+    if (!hazeUiState.confirmedStartDayKey) {
+      return null
+    }
+
+    return currentDetectedHaze?.startDayKey ?? hazeUiState.confirmedStartDayKey
+  }, [currentDetectedHaze, hazeUiState.confirmedStartDayKey])
+
+  const hazeRecoverySignal = useMemo(
+    () => getHazeRecoverySignal(hazeDayStats, effectiveConfirmedHazeStartDayKey),
+    [hazeDayStats, effectiveConfirmedHazeStartDayKey],
+  )
+
+  const hazeCompassionByDay = useMemo(
+    () => buildHazeCompassionByDay(detectedHazePeriods, effectiveConfirmedHazeStartDayKey, todayKey),
+    [detectedHazePeriods, effectiveConfirmedHazeStartDayKey, todayKey],
+  )
+
+  const isDetectedHazeDismissed = useMemo(() => {
+    if (!currentDetectedHaze) {
+      return false
+    }
+
+    return Boolean(
+      hazeUiState.dismissedStartDayKey === currentDetectedHaze.startDayKey &&
+        hazeUiState.dismissedUntilDayKey &&
+        todayKey <= hazeUiState.dismissedUntilDayKey,
+    )
+  }, [currentDetectedHaze, hazeUiState.dismissedStartDayKey, hazeUiState.dismissedUntilDayKey, todayKey])
+
+  const showHazeEntryPrompt = Boolean(
+    currentDetectedHaze && !hazeUiState.confirmedStartDayKey && !isDetectedHazeDismissed,
+  )
+
+  const showHazeExitPrompt = Boolean(
+    hazeUiState.confirmedStartDayKey &&
+      hazeRecoverySignal.recovered &&
+      (!hazeUiState.exitPromptSnoozedUntilDayKey || todayKey > hazeUiState.exitPromptSnoozedUntilDayKey),
+  )
+
+  const activeHazeStat = hazeDayStats[hazeDayStats.length - 1] ?? null
+
   const strengthDaySeries = useMemo<ChartPoint[]>(() => {
     const dayKeys =
       insightRange === '30d'
@@ -1642,7 +2238,10 @@ function App() {
           habit,
           logs,
           shiftDayKey(dayKey, 1),
-          dayKey === todayKey ? { optimisticCurrentDayKey: todayKey } : undefined,
+          {
+            optimisticCurrentDayKey: dayKey === todayKey ? todayKey : undefined,
+            hazeCompassionByDay,
+          },
         )
         const strengthAtDayEnd = getStrength(getAdaptiveK(habit), streakUnitsAtDayEnd)
         return sum + strengthAtDayEnd
@@ -1650,10 +2249,16 @@ function App() {
 
       return {
         label: shortDayLabel(dayKey),
+        dayKey,
         value: totalStrength / activeHabits.length,
       }
     })
-  }, [activeHabits, logs, todayKey, insightRange, fullRangeStartDay])
+  }, [activeHabits, logs, todayKey, insightRange, fullRangeStartDay, hazeCompassionByDay])
+
+  const systemHazeRanges = useMemo(
+    () => mapHazeRangesToChart(strengthDaySeries, detectedHazePeriods, effectiveConfirmedHazeStartDayKey),
+    [strengthDaySeries, detectedHazePeriods, effectiveConfirmedHazeStartDayKey],
+  )
 
   const totalGrowth = useMemo(() => {
     if (strengthDaySeries.length < 2) {
@@ -1667,12 +2272,12 @@ function App() {
       return 0
     }
     const total = activeHabits.reduce((sum, habit) => {
-      const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey)
+      const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey, { hazeCompassionByDay })
       const strength = getStrength(getAdaptiveK(habit), streakUnits)
       return sum + strength
     }, 0)
     return total / activeHabits.length
-  }, [activeHabits, logs, todayKey])
+  }, [activeHabits, logs, todayKey, hazeCompassionByDay])
 
   const riskBuckets = useMemo(() => {
     let fragile = 0
@@ -1680,7 +2285,7 @@ function App() {
     let automatic = 0
 
     for (const habit of activeHabits) {
-      const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey)
+      const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey, { hazeCompassionByDay })
       const strength = getStrength(getAdaptiveK(habit), streakUnits)
       const tier = getRiskTier(strength).title
       if (tier === 'Fragile') fragile += 1
@@ -1689,15 +2294,21 @@ function App() {
     }
 
     return { fragile, forming, automatic }
-  }, [activeHabits, logs, todayKey])
+  }, [activeHabits, logs, todayKey, hazeCompassionByDay])
 
   const insightHabitsSorted = useMemo(() => {
     return [...activeHabits].sort((a, b) => {
-      const strengthA = getStrength(getAdaptiveK(a), getConsecutiveSuccessUnits(a, logs, todayKey))
-      const strengthB = getStrength(getAdaptiveK(b), getConsecutiveSuccessUnits(b, logs, todayKey))
+      const strengthA = getStrength(
+        getAdaptiveK(a),
+        getConsecutiveSuccessUnits(a, logs, todayKey, { hazeCompassionByDay }),
+      )
+      const strengthB = getStrength(
+        getAdaptiveK(b),
+        getConsecutiveSuccessUnits(b, logs, todayKey, { hazeCompassionByDay }),
+      )
       return strengthB - strengthA
     })
-  }, [activeHabits, logs, todayKey])
+  }, [activeHabits, logs, todayKey, hazeCompassionByDay])
 
   const activeGalleryHabit = useMemo(
     () => insightHabitsSorted.find((habit) => habit.id === galleryHabitId) ?? null,
@@ -2346,7 +2957,7 @@ function App() {
   }
 
   function renderHabitCard(habit: Habit, targetDayKey: string, isBackfill = false) {
-    const streakUnits = getConsecutiveSuccessUnits(habit, logs, targetDayKey)
+    const streakUnits = getConsecutiveSuccessUnits(habit, logs, targetDayKey, { hazeCompassionByDay })
     const adaptiveK = getAdaptiveK(habit)
     const strength = getStrength(adaptiveK, streakUnits)
     const riskTier = getRiskTier(strength)
@@ -2617,6 +3228,131 @@ function App() {
       {rewardMessage && <div className="reward-toast">{rewardMessage}</div>}
 
       <section className="feed" aria-label="Daily habits feed">
+        {(showHazeEntryPrompt || showHazeExitPrompt) && (
+          <article className="haze-card">
+            <div className="haze-card-copy">
+              <span className="haze-card-icon">☁️</span>
+              <div>
+                <h2>
+                  {showHazeEntryPrompt
+                    ? tx('Looks like an off-days stretch', 'به نظر می‌رسد وارد چند روز غبارآلود شده‌ای')
+                    : showHazeExitPrompt
+                      ? tx('Things look lighter again', 'به نظر می‌رسد هوا دوباره سبک‌تر شده')
+                      : tx('Haze mode is on', 'حالت غبارآلود فعال است')}
+                </h2>
+                <p>
+                  {showHazeEntryPrompt
+                    ? tx(
+                        'Your recent completion rhythm dipped below your usual baseline. If this is real, the app can soften the decline and stay gentle until you come out of it.',
+                        'ریتم چند روز اخیرت از خط پایه معمولت پایین‌تر آمده است. اگر این وضعیت واقعی است، برنامه می‌تواند افت را نرم‌تر حساب کند و تا خروج از این فاز غبارآلود با تو مهربان بماند.',
+                      )
+                    : showHazeExitPrompt
+                      ? tx(
+                          'Your recent days look steadier. If you are coming out of the haze, I can close this stretch and keep the softened dip it earned.',
+                          'چند روز اخیرت باثبات‌تر به نظر می‌رسد. اگر داری از این دوره غبارآلود خارج می‌شوی، می‌توانم این بازه را ببندم و همان افت نرم‌شده را حفظ کنم.',
+                        )
+                      : tx(
+                          'During haze, decline is softened and tiny reps still count. If you rebound after it, the dip gets forgiven even more.',
+                          'در دوره غبارآلود، افت نرم‌تر محاسبه می‌شود و قدم‌های خیلی کوچک هم حساب می‌شوند. اگر بعدش دوباره اوج بگیری، افت این دوره بیشتر بخشیده می‌شود.',
+                        )}
+                </p>
+                {activeHazeStat && (
+                  <p className="haze-card-meta">
+                    {tx('Today vs baseline', 'امروز در مقایسه با خط پایه')}: {' '}
+                    <strong>{Math.round(activeHazeStat.ratio * 100)}%</strong>
+                    {typeof activeHazeStat.baseline === 'number' && (
+                      <>
+                        {' '}
+                        · {tx('baseline', 'خط پایه')} <strong>{Math.round(activeHazeStat.baseline * 100)}%</strong>
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="haze-card-actions">
+              {showHazeEntryPrompt && currentDetectedHaze && (
+                <>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      setHazeUiState((prev) => ({
+                        ...prev,
+                        confirmedStartDayKey: currentDetectedHaze.startDayKey,
+                        dismissedStartDayKey: null,
+                        dismissedUntilDayKey: null,
+                        exitPromptSnoozedUntilDayKey: null,
+                      }))
+                      setRewardMessage(
+                        tx(
+                          'Haze mode is on. The app will be gentler with this dip.',
+                          'حالت غبارآلود فعال شد. برنامه با این افت مهربان‌تر برخورد می‌کند.',
+                        ),
+                      )
+                    }}
+                  >
+                    {tx('Yes, this is a haze stretch', 'بله، این یک دوره غبارآلود است')}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => {
+                      setHazeUiState((prev) => ({
+                        ...prev,
+                        dismissedStartDayKey: currentDetectedHaze.startDayKey,
+                        dismissedUntilDayKey: shiftDayKey(todayKey, 3),
+                      }))
+                    }}
+                  >
+                    {tx('Not really', 'نه، لزوماً این‌طور نیست')}
+                  </button>
+                </>
+              )}
+
+              {!showHazeEntryPrompt && showHazeExitPrompt && (
+                <>
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      setHazeUiState((prev) => ({
+                        ...prev,
+                        confirmedStartDayKey: null,
+                        exitPromptSnoozedUntilDayKey: null,
+                        dismissedStartDayKey: prev.confirmedStartDayKey,
+                        dismissedUntilDayKey: shiftDayKey(todayKey, 2),
+                      }))
+                      setRewardMessage(
+                        tx(
+                          'Marked as coming out of haze. Welcome back gently.',
+                          'خروج از فاز غبارآلود ثبت شد. خوش برگشتی، آرام و مهربان.',
+                        ),
+                      )
+                    }}
+                  >
+                    {tx('Yes, I am coming out', 'بله، دارم از آن خارج می‌شوم')}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => {
+                      setHazeUiState((prev) => ({
+                        ...prev,
+                        exitPromptSnoozedUntilDayKey: shiftDayKey(todayKey, 2),
+                      }))
+                    }}
+                  >
+                    {tx('Still in it', 'هنوز در آن هستم')}
+                  </button>
+                </>
+              )}
+
+            </div>
+          </article>
+        )}
+
         {visibleHabits.length === 0 && (
           <article className="empty-state">
             <h2>{tx('Feed is clear ✨', 'فید خلوت شد ✨')}</h2>
@@ -2861,7 +3597,9 @@ function App() {
             </select>
 
             {managedHabit && (() => {
-              const streakUnits = getConsecutiveSuccessUnits(managedHabit, logs, todayKey)
+              const streakUnits = getConsecutiveSuccessUnits(managedHabit, logs, todayKey, {
+                hazeCompassionByDay,
+              })
               const adaptiveK = getAdaptiveK(managedHabit)
               const strength = getStrength(adaptiveK, streakUnits)
               const risk = 100 - strength
@@ -3246,13 +3984,27 @@ function App() {
 
             <div className="chart-block">
               <div className="chart-block-head">
-                <button
-                  type="button"
-                  className="secondary-btn"
-                  onClick={() => setInsightRange((prev) => (prev === '30d' ? 'full' : '30d'))}
-                >
-                  {insightRange === '30d' ? tx('Full range', 'بازه کامل') : tx('Last 30 days', '۳۰ روز اخیر')}
-                </button>
+                <div className="chart-tools-row">
+                  <label className="fog-toggle">
+                    <input
+                      type="checkbox"
+                      checked={showUnderFogDetails}
+                      onChange={(event) => setShowUnderFogDetails(event.target.checked)}
+                    />
+                    <span>
+                      {showUnderFogDetails
+                        ? tx('Hide data under haze', 'پنهان‌کردن داده زیر مه')
+                        : tx('Show data under haze', 'نمایش داده زیر مه')}
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => setInsightRange((prev) => (prev === '30d' ? 'full' : '30d'))}
+                  >
+                    {insightRange === '30d' ? tx('Full range', 'بازه کامل') : tx('Last 30 days', '۳۰ روز اخیر')}
+                  </button>
+                </div>
               </div>
               <StrengthLineChart
                 data={strengthDaySeries}
@@ -3260,7 +4012,12 @@ function App() {
                 fill="rgba(16, 185, 129, 0.14)"
                 optimisticLastPoint
                 optimisticColor="#3b82f6"
+                hazeRanges={systemHazeRanges}
+                showUnderFogDetails={showUnderFogDetails}
               />
+              <p className="chart-legend haze-legend">
+                ☁︎ {tx('Haze overlays mark off-day stretches. Confirmed haze also softens decline.', 'ابرهای مه، دوره‌های کم‌جان را نشان می‌دهند. مه تأییدشده افت را هم نرم‌تر می‌کند.')}
+              </p>
             </div>
 
             <div className="chart-block">
@@ -3277,7 +4034,7 @@ function App() {
             <div className="insight-accordion">
               {insightHabitsSorted.map((habit) => {
                 const isOpen = expandedInsightHabitId === habit.id
-                const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey)
+                const streakUnits = getConsecutiveSuccessUnits(habit, logs, todayKey, { hazeCompassionByDay })
                 const adaptiveK = getAdaptiveK(habit)
                 const strength = getStrength(adaptiveK, streakUnits)
                 const risk = 100 - strength
@@ -3306,13 +4063,22 @@ function App() {
                     habit,
                     logs,
                     shiftDayKey(dayKey, 1),
-                    dayKey === todayKey ? { optimisticCurrentDayKey: todayKey } : undefined,
+                    {
+                      optimisticCurrentDayKey: dayKey === todayKey ? todayKey : undefined,
+                      hazeCompassionByDay,
+                    },
                   )
                   return {
                     label: shortDayLabel(dayKey),
+                    dayKey,
                     value: getStrength(adaptiveK, streakAtDayEnd),
                   }
                 })
+                const habitHazeRanges = mapHazeRangesToChart(
+                  habitStrengthSeries,
+                  detectedHazePeriods,
+                  effectiveConfirmedHazeStartDayKey,
+                )
 
                 const latestSrhi = habit.srhiReports.at(-1)
                 const latestSrhiAverage = latestSrhi ? srhiAverage(latestSrhi.scores) : null
@@ -3552,7 +4318,12 @@ function App() {
                             fill="rgba(59, 130, 246, 0.12)"
                             optimisticLastPoint
                             optimisticColor="#10b981"
+                            hazeRanges={habitHazeRanges}
+                            showUnderFogDetails={showUnderFogDetails}
                           />
+                          <p className="chart-legend haze-legend">
+                            ☁︎ {tx('Global haze stretches are projected onto each habit trend too.', 'بازه‌های مهِ کلی روی نمودار هر عادت هم نمایش داده می‌شوند.')}
+                          </p>
                         </div>
 
                         {secondaryVisible && habit.reportingType === 'mood' && moodData.length > 0 && (

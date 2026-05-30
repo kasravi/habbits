@@ -79,6 +79,50 @@ body {
   gap: 12px;
 }
 
+.haze-card {
+  background: linear-gradient(135deg, #eff6ff, #f8fafc 56%, #eef2ff);
+  border: 1px solid #bfdbfe;
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 8px 28px rgba(37, 99, 235, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.haze-card-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.haze-card-icon {
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.haze-card h2 {
+  margin: 0 0 4px;
+  font-size: 1.03rem;
+}
+
+.haze-card p {
+  margin: 0;
+  color: #334155;
+}
+
+.haze-card-meta {
+  margin-top: 6px;
+  font-size: 0.84rem;
+  color: #475569;
+}
+
+.haze-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .habit-card,
 .empty-state {
   background: #ffffff;
@@ -537,10 +581,37 @@ body {
   background: #f9fafb;
 }
 
+.chart-legend {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  color: #64748b;
+}
+
+.haze-legend {
+  color: #475569;
+}
+
 .chart-block-head {
   display: flex;
   justify-content: flex-end;
   margin-bottom: 6px;
+}
+
+.chart-tools-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.fog-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #475569;
+  font-size: 0.82rem;
 }
 
 .bar-chart {
@@ -879,6 +950,10 @@ body {
 @media (max-width: 640px) {
   .metrics-grid {
     grid-template-columns: 1fr;
+  }
+
+  .haze-card-copy {
+    flex-direction: column;
   }
 
   .inline-fields {
