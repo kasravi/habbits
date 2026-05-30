@@ -233,6 +233,8 @@ interface ParsedReport {
   faceLabel?: keyof typeof FACE_TONE_LABELS
   faceScore?: number
   faceAnalysisStatus?: 'pending' | 'ready' | 'unavailable'
+  faceAnalysisMessage?: string
+  faceAnalysisDelegate?: 'GPU' | 'CPU'
 }
 
 interface CameraCaptureSession {
@@ -773,6 +775,24 @@ function getFaceToneEmoji(label: keyof typeof FACE_TONE_LABELS | undefined): str
   return FACE_TONE_EMOJIS[label]
 }
 
+function getFaceAnalysisStatusEmoji(
+  report: Pick<ParsedReport, 'faceAnalysisStatus' | 'faceLabel'>,
+): string {
+  if (report.faceLabel) {
+    return getFaceToneEmoji(report.faceLabel)
+  }
+
+  if (report.faceAnalysisStatus === 'pending') {
+    return '⏳'
+  }
+
+  if (report.faceAnalysisStatus === 'unavailable') {
+    return '❔'
+  }
+
+  return '🙂'
+}
+
 function getFaceAnalysisStatusLabel(
   report: Pick<ParsedReport, 'faceAnalysisStatus' | 'faceLabel'>,
   language: 'en' | 'fa',
@@ -790,6 +810,38 @@ function getFaceAnalysisStatusLabel(
   }
 
   return language === 'fa' ? 'نامشخص' : 'Unknown'
+}
+
+function getFaceAnalysisDetail(
+  report: Pick<
+    ParsedReport,
+    'faceAnalysisStatus' | 'faceAnalysisMessage' | 'faceAnalysisDelegate'
+  >,
+  language: 'en' | 'fa',
+): string {
+  if (report.faceAnalysisStatus === 'pending') {
+    return language === 'fa'
+      ? 'تحلیل در پس‌زمینه در حال انجام است.'
+      : 'Analysis is still running in the background.'
+  }
+
+  const delegateText = report.faceAnalysisDelegate
+    ? language === 'fa'
+      ? `اجرا با ${report.faceAnalysisDelegate}`
+      : `via ${report.faceAnalysisDelegate}`
+    : ''
+
+  if (report.faceAnalysisMessage) {
+    return delegateText ? `${report.faceAnalysisMessage} · ${delegateText}` : report.faceAnalysisMessage
+  }
+
+  if (report.faceAnalysisStatus === 'unavailable') {
+    return language === 'fa'
+      ? 'برای این سلفی نتیجه قابل‌استفاده‌ای به‌دست نیامد.'
+      : 'No usable result was produced for this selfie.'
+  }
+
+  return ''
 }
 
 function formatRelativeDateTime(value: string | null, language: 'en' | 'fa'): string {
@@ -1967,6 +2019,10 @@ function App() {
       imageDataUrl,
       caption,
       faceAnalysisStatus: 'pending',
+      faceAnalysisMessage: tx(
+        'Waiting for face analysis to finish.',
+        'در انتظار پایان تحلیل چهره.',
+      ),
     }
     const entry = appendHabitLog(habit, pendingReport, targetDayKey)
     setRewardMessage(
@@ -1977,15 +2033,17 @@ function App() {
     )
 
     void analyzeFaceSentiment(imageDataUrl)
-      .then((faceTone) => {
+      .then((analysis) => {
         updateHabitLogReport(entry.id, {
           type: 'selfie',
           imageDataUrl,
           caption,
-          faceLabel: faceTone?.label,
-          faceScore: faceTone?.score,
-          sentiment: faceTone?.score,
-          faceAnalysisStatus: faceTone ? 'ready' : 'unavailable',
+          faceLabel: analysis.result?.label,
+          faceScore: analysis.result?.score,
+          sentiment: analysis.result?.score,
+          faceAnalysisStatus: analysis.status === 'ready' ? 'ready' : 'unavailable',
+          faceAnalysisMessage: analysis.message,
+          faceAnalysisDelegate: analysis.delegate,
         })
       })
       .catch(() => {
@@ -1994,6 +2052,10 @@ function App() {
           imageDataUrl,
           caption,
           faceAnalysisStatus: 'unavailable',
+          faceAnalysisMessage: tx(
+            'Face analysis crashed before it could finish.',
+            'تحلیل چهره پیش از تکمیل متوقف شد.',
+          ),
         })
       })
   }
@@ -2959,7 +3021,7 @@ function App() {
                         {selfieLogs.length
                           ? selfieLogs.slice(-8).map((report, index) => (
                               <span key={`${managedHabit.id}-selfie-${index}`}>
-                                {getFaceToneEmoji(report.faceLabel)}
+                                {getFaceAnalysisStatusEmoji(report)}
                               </span>
                             ))
                           : tx('No selfie tone logs yet', 'هنوز ثبت حالِ سلفی نداری')}
@@ -2967,6 +3029,11 @@ function App() {
                       {latestSelfie && (
                         <p className="meta-line">
                           {tx('Latest tone', 'آخرین حال')}: <strong>{getFaceAnalysisStatusLabel(latestSelfie, language)}</strong>
+                        </p>
+                      )}
+                      {latestSelfie && getFaceAnalysisDetail(latestSelfie, language) && (
+                        <p className="meta-line">
+                          {getFaceAnalysisDetail(latestSelfie, language)}
                         </p>
                       )}
                       <p className="meta-line">
@@ -3555,16 +3622,21 @@ function App() {
                                     <span>{selectedMediaReport.report.caption}</span>
                                   )}
                                   {selectedMediaReport.report.type === 'selfie' && (
-                                    <span>
-                                      {tx('Face tone', 'حال چهره')}: {getFaceToneEmoji(selectedMediaReport.report.faceLabel)}{' '}
-                                      {getFaceAnalysisStatusLabel(selectedMediaReport.report, language)}
-                                      {typeof selectedMediaReport.report.faceScore === 'number' && (
-                                        <>
-                                          {' '}
-                                          · {tx('score', 'امتیاز')} {selectedMediaReport.report.faceScore.toFixed(2)}
-                                        </>
+                                    <>
+                                      <span>
+                                        {tx('Face tone', 'حال چهره')}: {getFaceAnalysisStatusEmoji(selectedMediaReport.report)}{' '}
+                                        {getFaceAnalysisStatusLabel(selectedMediaReport.report, language)}
+                                        {typeof selectedMediaReport.report.faceScore === 'number' && (
+                                          <>
+                                            {' '}
+                                            · {tx('score', 'امتیاز')} {selectedMediaReport.report.faceScore.toFixed(2)}
+                                          </>
+                                        )}
+                                      </span>
+                                      {getFaceAnalysisDetail(selectedMediaReport.report, language) && (
+                                        <span>{getFaceAnalysisDetail(selectedMediaReport.report, language)}</span>
                                       )}
-                                    </span>
+                                    </>
                                   )}
                                   <span className="media-preview-hint">
                                     {tx('Tap to open gallery and pick another day.', 'برای باز کردن گالری و انتخاب روز دیگر لمس کن.')}
@@ -3631,16 +3703,23 @@ function App() {
                 )}
 
                 {selectedActiveGalleryEntry.report.type === 'selfie' && (
-                  <p className="meta-line">
-                    {tx('Face tone', 'حال چهره')}: {getFaceToneEmoji(selectedActiveGalleryEntry.report.faceLabel)}{' '}
-                    {getFaceAnalysisStatusLabel(selectedActiveGalleryEntry.report, language)}
-                    {typeof selectedActiveGalleryEntry.report.faceScore === 'number' && (
-                      <>
-                        {' '}
-                        · {tx('score', 'امتیاز')} {selectedActiveGalleryEntry.report.faceScore.toFixed(2)}
-                      </>
+                  <>
+                    <p className="meta-line">
+                      {tx('Face tone', 'حال چهره')}: {getFaceAnalysisStatusEmoji(selectedActiveGalleryEntry.report)}{' '}
+                      {getFaceAnalysisStatusLabel(selectedActiveGalleryEntry.report, language)}
+                      {typeof selectedActiveGalleryEntry.report.faceScore === 'number' && (
+                        <>
+                          {' '}
+                          · {tx('score', 'امتیاز')} {selectedActiveGalleryEntry.report.faceScore.toFixed(2)}
+                        </>
+                      )}
+                    </p>
+                    {getFaceAnalysisDetail(selectedActiveGalleryEntry.report, language) && (
+                      <p className="meta-line">
+                        {getFaceAnalysisDetail(selectedActiveGalleryEntry.report, language)}
+                      </p>
                     )}
-                  </p>
+                  </>
                 )}
               </div>
             </div>

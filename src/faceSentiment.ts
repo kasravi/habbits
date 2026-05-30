@@ -13,12 +13,19 @@ export interface FaceSentimentResult {
   tension: number
 }
 
+export interface FaceSentimentAnalysis {
+  result: FaceSentimentResult | null
+  status: 'ready' | 'no-face' | 'error'
+  message: string
+  delegate: 'GPU' | 'CPU'
+}
+
 interface BlendshapeCategory {
   categoryName: string
   score: number
 }
 
-let faceLandmarkerPromise: Promise<FaceLandmarker> | null = null
+const faceLandmarkerPromises: Partial<Record<'GPU' | 'CPU', Promise<FaceLandmarker>>> = {}
 
 function getBlendshapeScore(categories: BlendshapeCategory[], name: string): number {
   return categories.find((category) => category.categoryName === name)?.score ?? 0
@@ -62,28 +69,28 @@ function scoreFaceTone(categories: BlendshapeCategory[]): FaceSentimentResult {
   return { label: 'stressed', score, smile, frown, tension }
 }
 
-async function ensureFaceLandmarker(): Promise<FaceLandmarker> {
-  if (!faceLandmarkerPromise) {
-    faceLandmarkerPromise = (async () => {
+async function ensureFaceLandmarker(delegate: 'GPU' | 'CPU'): Promise<FaceLandmarker> {
+  if (!faceLandmarkerPromises[delegate]) {
+    faceLandmarkerPromises[delegate] = (async () => {
       const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_BASE_URL)
 
       return FaceLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath:
             'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-          delegate: 'GPU',
+          delegate,
         },
         runningMode: 'IMAGE',
         outputFaceBlendshapes: true,
         numFaces: 1,
       })
     })().catch((error) => {
-      faceLandmarkerPromise = null
+      delete faceLandmarkerPromises[delegate]
       throw error
     })
   }
 
-  return faceLandmarkerPromise
+  return faceLandmarkerPromises[delegate] as Promise<FaceLandmarker>
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -95,15 +102,52 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   })
 }
 
-export async function analyzeFaceSentiment(imageDataUrl: string): Promise<FaceSentimentResult | null> {
-  const landmarker = await ensureFaceLandmarker()
+export async function analyzeFaceSentiment(imageDataUrl: string): Promise<FaceSentimentAnalysis> {
   const image = await loadImage(imageDataUrl)
-  const result = landmarker.detect(image)
-  const categories = (result.faceBlendshapes?.[0]?.categories ?? []) as BlendshapeCategory[]
 
-  if (!categories.length) {
-    return null
+  for (const delegate of ['GPU', 'CPU'] as const) {
+    try {
+      const landmarker = await ensureFaceLandmarker(delegate)
+      const detection = landmarker.detect(image)
+      const categories = (detection.faceBlendshapes?.[0]?.categories ?? []) as BlendshapeCategory[]
+
+      if (!categories.length) {
+        return {
+          result: null,
+          status: 'no-face',
+          message:
+            delegate === 'GPU'
+              ? 'No usable face blendshapes were returned.'
+              : 'No usable face blendshapes were returned, even after CPU fallback.',
+          delegate,
+        }
+      }
+
+      return {
+        result: scoreFaceTone(categories),
+        status: 'ready',
+        message: `${delegate} analysis completed successfully.`,
+        delegate,
+      }
+    } catch (error) {
+      if (delegate === 'CPU') {
+        return {
+          result: null,
+          status: 'error',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Face analysis failed on both GPU and CPU delegates.',
+          delegate,
+        }
+      }
+    }
   }
 
-  return scoreFaceTone(categories)
+  return {
+    result: null,
+    status: 'error',
+    message: 'Face analysis could not start.',
+    delegate: 'CPU',
+  }
 }
