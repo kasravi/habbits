@@ -257,6 +257,7 @@ interface MediaGalleryEntry {
 
 interface HazeUiState {
   confirmedStartDayKey: string | null
+  lastConfirmedStartDayKey: string | null
   dismissedStartDayKey: string | null
   dismissedUntilDayKey: string | null
   exitPromptSnoozedUntilDayKey: string | null
@@ -324,6 +325,7 @@ function getEffectiveDayKey(now = new Date()): string {
 function defaultHazeUiState(): HazeUiState {
   return {
     confirmedStartDayKey: null,
+    lastConfirmedStartDayKey: null,
     dismissedStartDayKey: null,
     dismissedUntilDayKey: null,
     exitPromptSnoozedUntilDayKey: null,
@@ -345,6 +347,8 @@ function loadHazeUiState(): HazeUiState {
     return {
       confirmedStartDayKey:
         typeof parsed.confirmedStartDayKey === 'string' ? parsed.confirmedStartDayKey : null,
+      lastConfirmedStartDayKey:
+        typeof parsed.lastConfirmedStartDayKey === 'string' ? parsed.lastConfirmedStartDayKey : null,
       dismissedStartDayKey:
         typeof parsed.dismissedStartDayKey === 'string' ? parsed.dismissedStartDayKey : null,
       dismissedUntilDayKey:
@@ -1562,9 +1566,9 @@ function detectHazePeriods(stats: DayCompletionStat[]): HazePeriod[] {
 
     const startsHaze =
       baseline !== null &&
-      baseline >= 0.48 &&
-      stat.trailing3Average <= Math.max(0.56, baseline - 0.12) &&
-      stat.ratio <= Math.max(0.68, baseline - 0.08)
+      baseline >= 0.45 &&
+      stat.trailing3Average <= Math.max(0.6, baseline - 0.1) &&
+      stat.ratio <= Math.max(0.72, baseline - 0.06)
 
     if (!startsHaze) {
       index += 1
@@ -1598,8 +1602,8 @@ function detectHazePeriods(stats: DayCompletionStat[]): HazePeriod[] {
         recoveryStartIndex = -1
         lastHazeIndex = cursor
         if (
-          entry.trailing3Average <= anchorBaseline - 0.14 ||
-          entry.ratio <= anchorBaseline - 0.18
+          entry.trailing3Average <= anchorBaseline - 0.12 ||
+          entry.ratio <= anchorBaseline - 0.15
         ) {
           hasMeaningfulDip = true
         }
@@ -1610,7 +1614,7 @@ function detectHazePeriods(stats: DayCompletionStat[]): HazePeriod[] {
         entry.trailing3Average >= recoveryThreshold &&
         entry.ratio >= Math.max(0.4, recoveryThreshold - 0.05)
 
-      if (lowDayCount >= 3 && recoveryEnough) {
+      if (lowDayCount >= 2 && recoveryEnough) {
         if (recoveryStreak === 0) {
           recoveryStartIndex = cursor
         }
@@ -1632,11 +1636,11 @@ function detectHazePeriods(stats: DayCompletionStat[]): HazePeriod[] {
     const recoveryDayKey = recovered ? stats[recoveryStartIndex]?.dayKey ?? null : null
 
     if (
-      slice.length >= 4 &&
-      lowDayCount >= 3 &&
+      slice.length >= 3 &&
+      lowDayCount >= 2 &&
       hasMeaningfulDip &&
-      averageRatio <= anchorBaseline - 0.12 &&
-      minTrailing3 <= anchorBaseline - 0.12
+      averageRatio <= anchorBaseline - 0.1 &&
+      minTrailing3 <= anchorBaseline - 0.09
     ) {
       periods.push({
         startDayKey: slice[0].dayKey,
@@ -1714,7 +1718,15 @@ function buildHazeCompassionByDay(
 ): Record<string, number> {
   const compassionByDay: Record<string, number> = {}
 
+  if (!confirmedStartDayKey) {
+    return compassionByDay
+  }
+
   for (const period of periods) {
+    if (period.startDayKey !== confirmedStartDayKey) {
+      continue
+    }
+
     const periodCompassion = period.recovered ? 0.78 : period.severity === 'heavy' ? 0.54 : 0.4
     for (const dayKey of getDayKeysBetween(period.startDayKey, period.endDayKey)) {
       compassionByDay[dayKey] = Math.max(compassionByDay[dayKey] ?? 0, periodCompassion)
@@ -1735,6 +1747,10 @@ function mapHazeRangesToChart(
   periods: HazePeriod[],
   confirmedStartDayKey: string | null,
 ): HazeChartRange[] {
+  if (!confirmedStartDayKey) {
+    return []
+  }
+
   const dayIndex = new Map<string, number>()
   data.forEach((entry, index) => {
     if (entry.dayKey) {
@@ -1743,6 +1759,7 @@ function mapHazeRangesToChart(
   })
 
   return periods
+    .filter((period) => period.startDayKey === confirmedStartDayKey)
     .map((period) => {
       const startIndex = dayIndex.get(period.startDayKey)
       const endIndex = dayIndex.get(period.endDayKey)
@@ -2180,22 +2197,44 @@ function App() {
     return shiftDayKey(latest.endDayKey, 1) >= todayKey ? latest : null
   }, [detectedHazePeriods, todayKey])
 
-  const effectiveConfirmedHazeStartDayKey = useMemo(() => {
-    if (!hazeUiState.confirmedStartDayKey) {
+  const isCurrentDetectedHazeConfirmed = useMemo(() => {
+    if (!currentDetectedHaze || !hazeUiState.confirmedStartDayKey) {
+      return false
+    }
+
+    return hazeUiState.confirmedStartDayKey === currentDetectedHaze.startDayKey
+  }, [currentDetectedHaze, hazeUiState.confirmedStartDayKey])
+
+  const activeConfirmedHazeStartDayKey = useMemo(() => {
+    if (!isCurrentDetectedHazeConfirmed) {
       return null
     }
 
-    return currentDetectedHaze?.startDayKey ?? hazeUiState.confirmedStartDayKey
-  }, [currentDetectedHaze, hazeUiState.confirmedStartDayKey])
+    return hazeUiState.confirmedStartDayKey
+  }, [hazeUiState.confirmedStartDayKey, isCurrentDetectedHazeConfirmed])
+
+  const visualizedConfirmedHazeStartDayKey = useMemo(() => {
+    const candidates = [hazeUiState.confirmedStartDayKey, hazeUiState.lastConfirmedStartDayKey].filter(
+      (value): value is string => Boolean(value),
+    )
+
+    for (const candidate of candidates) {
+      if (detectedHazePeriods.some((period) => period.startDayKey === candidate)) {
+        return candidate
+      }
+    }
+
+    return null
+  }, [detectedHazePeriods, hazeUiState.confirmedStartDayKey, hazeUiState.lastConfirmedStartDayKey])
 
   const hazeRecoverySignal = useMemo(
-    () => getHazeRecoverySignal(hazeDayStats, effectiveConfirmedHazeStartDayKey),
-    [hazeDayStats, effectiveConfirmedHazeStartDayKey],
+    () => getHazeRecoverySignal(hazeDayStats, activeConfirmedHazeStartDayKey),
+    [hazeDayStats, activeConfirmedHazeStartDayKey],
   )
 
   const hazeCompassionByDay = useMemo(
-    () => buildHazeCompassionByDay(detectedHazePeriods, effectiveConfirmedHazeStartDayKey, todayKey),
-    [detectedHazePeriods, effectiveConfirmedHazeStartDayKey, todayKey],
+    () => buildHazeCompassionByDay(detectedHazePeriods, visualizedConfirmedHazeStartDayKey, todayKey),
+    [detectedHazePeriods, visualizedConfirmedHazeStartDayKey, todayKey],
   )
 
   const isDetectedHazeDismissed = useMemo(() => {
@@ -2211,7 +2250,7 @@ function App() {
   }, [currentDetectedHaze, hazeUiState.dismissedStartDayKey, hazeUiState.dismissedUntilDayKey, todayKey])
 
   const showHazeEntryPrompt = Boolean(
-    currentDetectedHaze && !hazeUiState.confirmedStartDayKey && !isDetectedHazeDismissed,
+    currentDetectedHaze && !isCurrentDetectedHazeConfirmed && !isDetectedHazeDismissed,
   )
 
   const showHazeExitPrompt = Boolean(
@@ -2256,8 +2295,8 @@ function App() {
   }, [activeHabits, logs, todayKey, insightRange, fullRangeStartDay, hazeCompassionByDay])
 
   const systemHazeRanges = useMemo(
-    () => mapHazeRangesToChart(strengthDaySeries, detectedHazePeriods, effectiveConfirmedHazeStartDayKey),
-    [strengthDaySeries, detectedHazePeriods, effectiveConfirmedHazeStartDayKey],
+    () => mapHazeRangesToChart(strengthDaySeries, detectedHazePeriods, visualizedConfirmedHazeStartDayKey),
+    [strengthDaySeries, detectedHazePeriods, visualizedConfirmedHazeStartDayKey],
   )
 
   const totalGrowth = useMemo(() => {
@@ -2812,6 +2851,7 @@ function App() {
 
       setHabits(imported.habits)
       setLogs(imported.logs)
+      setHazeUiState(defaultHazeUiState())
       const restoredAt = new Date().toISOString()
       setDriveBackupSettings((prev) => ({
         ...prev,
@@ -2916,6 +2956,7 @@ function App() {
       }
       setHabits(imported.habits)
       setLogs(imported.logs)
+      setHazeUiState(defaultHazeUiState())
       setIsImportExportOpen(false)
       setRewardMessage(tx('Import completed. You are safely back online.', 'ورود اطلاعات انجام شد. همه چیز آماده است.'))
     } catch {
@@ -3281,6 +3322,7 @@ function App() {
                       setHazeUiState((prev) => ({
                         ...prev,
                         confirmedStartDayKey: currentDetectedHaze.startDayKey,
+                        lastConfirmedStartDayKey: currentDetectedHaze.startDayKey,
                         dismissedStartDayKey: null,
                         dismissedUntilDayKey: null,
                         exitPromptSnoozedUntilDayKey: null,
@@ -3301,6 +3343,14 @@ function App() {
                     onClick={() => {
                       setHazeUiState((prev) => ({
                         ...prev,
+                        confirmedStartDayKey:
+                          prev.confirmedStartDayKey === currentDetectedHaze.startDayKey
+                            ? null
+                            : prev.confirmedStartDayKey,
+                        lastConfirmedStartDayKey:
+                          prev.lastConfirmedStartDayKey === currentDetectedHaze.startDayKey
+                            ? null
+                            : prev.lastConfirmedStartDayKey,
                         dismissedStartDayKey: currentDetectedHaze.startDayKey,
                         dismissedUntilDayKey: shiftDayKey(todayKey, 3),
                       }))
@@ -3320,6 +3370,7 @@ function App() {
                       setHazeUiState((prev) => ({
                         ...prev,
                         confirmedStartDayKey: null,
+                        lastConfirmedStartDayKey: prev.confirmedStartDayKey ?? prev.lastConfirmedStartDayKey,
                         exitPromptSnoozedUntilDayKey: null,
                         dismissedStartDayKey: prev.confirmedStartDayKey,
                         dismissedUntilDayKey: shiftDayKey(todayKey, 2),
@@ -4077,7 +4128,7 @@ function App() {
                 const habitHazeRanges = mapHazeRangesToChart(
                   habitStrengthSeries,
                   detectedHazePeriods,
-                  effectiveConfirmedHazeStartDayKey,
+                  visualizedConfirmedHazeStartDayKey,
                 )
 
                 const latestSrhi = habit.srhiReports.at(-1)
