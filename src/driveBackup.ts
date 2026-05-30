@@ -15,8 +15,16 @@ export interface DriveBackupResult {
 }
 
 const SETTINGS_KEY = 'habit-feed-drive-backup-settings-v1'
-const BACKUP_FILE_NAME = 'habit-feed-backup.json'
+const LATEST_BACKUP_FILE_NAME = 'habit-feed-backup.json'
+const SNAPSHOT_FILE_PREFIX = 'habit-feed-backup-snapshot-'
+const SNAPSHOT_RETENTION_DAYS = 3
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata'
+
+interface DriveFileRecord {
+  id: string
+  name: string
+  modifiedTime?: string
+}
 
 interface GoogleTokenResponse {
   access_token?: string
@@ -164,10 +172,23 @@ async function getAccessToken(clientId: string, interactive: boolean): Promise<s
   return requestToken('')
 }
 
-async function listBackupFiles(accessToken: string): Promise<Array<{ id: string; modifiedTime?: string }>> {
-  const query = encodeURIComponent(`name='${BACKUP_FILE_NAME}' and 'appDataFolder' in parents and trashed=false`)
+function formatDayKey(date: Date): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function getSnapshotFileName(dayKey: string): string {
+  return `${SNAPSHOT_FILE_PREFIX}${dayKey}.json`
+}
+
+async function listBackupFiles(accessToken: string): Promise<DriveFileRecord[]> {
+  const query = encodeURIComponent(
+    `'appDataFolder' in parents and trashed=false and (name='${LATEST_BACKUP_FILE_NAME}' or name contains '${SNAPSHOT_FILE_PREFIX}')`,
+  )
   const response = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${query}&spaces=appDataFolder&fields=files(id,modifiedTime)&orderBy=modifiedTime desc`,
+    `https://www.googleapis.com/drive/v3/files?q=${query}&spaces=appDataFolder&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -179,7 +200,7 @@ async function listBackupFiles(accessToken: string): Promise<Array<{ id: string;
     throw new Error('Could not list Google Drive backups.')
   }
 
-  const payload = (await response.json()) as { files?: Array<{ id: string; modifiedTime?: string }> }
+  const payload = (await response.json()) as { files?: DriveFileRecord[] }
   return payload.files ?? []
 }
 
@@ -198,22 +219,19 @@ function createMultipartBody(metadata: Record<string, unknown>, content: string,
   ].join('\r\n')
 }
 
-export async function uploadBackupToDrive(options: {
+async function upsertBackupFile(options: {
   clientId: string
+  accessToken?: string
   content: string
+  name: string
   fileId?: string | null
   interactive: boolean
 }): Promise<DriveBackupResult> {
-  const accessToken = await getAccessToken(options.clientId, options.interactive)
+  const accessToken = options.accessToken ?? (await getAccessToken(options.clientId, options.interactive))
   const boundary = `habit-feed-${crypto.randomUUID()}`
   let method = 'POST'
   let url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart'
   let fileId = options.fileId ?? null
-
-  if (!fileId) {
-    const existingFiles = await listBackupFiles(accessToken)
-    fileId = existingFiles[0]?.id ?? null
-  }
 
   if (fileId) {
     method = 'PATCH'
@@ -221,8 +239,8 @@ export async function uploadBackupToDrive(options: {
   }
 
   const metadata = fileId
-    ? { name: BACKUP_FILE_NAME }
-    : { name: BACKUP_FILE_NAME, parents: ['appDataFolder'] }
+    ? { name: options.name }
+    : { name: options.name, parents: ['appDataFolder'] }
 
   const response = await fetch(url, {
     method,
@@ -244,6 +262,63 @@ export async function uploadBackupToDrive(options: {
   }
 }
 
+async function deleteBackupFile(accessToken: string, fileId: string): Promise<void> {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  })
+
+  if (!response.ok && response.status !== 404) {
+    throw new Error('Could not clean up old Google Drive snapshots.')
+  }
+}
+
+export async function uploadBackupToDrive(options: {
+  clientId: string
+  content: string
+  fileId?: string | null
+  interactive: boolean
+}): Promise<DriveBackupResult> {
+  const accessToken = await getAccessToken(options.clientId, options.interactive)
+  const existingFiles = await listBackupFiles(accessToken)
+  const latestFile =
+    existingFiles.find((entry) => entry.id === options.fileId) ??
+    existingFiles.find((entry) => entry.name === LATEST_BACKUP_FILE_NAME) ??
+    null
+
+  const latestResult = await upsertBackupFile({
+    clientId: options.clientId,
+    accessToken,
+    content: options.content,
+    name: LATEST_BACKUP_FILE_NAME,
+    fileId: latestFile?.id ?? null,
+    interactive: options.interactive,
+  })
+
+  const todaySnapshotName = getSnapshotFileName(formatDayKey(new Date()))
+  const snapshotFile = existingFiles.find((entry) => entry.name === todaySnapshotName) ?? null
+
+  await upsertBackupFile({
+    clientId: options.clientId,
+    accessToken,
+    content: options.content,
+    name: todaySnapshotName,
+    fileId: snapshotFile?.id ?? null,
+    interactive: options.interactive,
+  })
+
+  const staleSnapshots = existingFiles
+    .filter((entry) => entry.name.startsWith(SNAPSHOT_FILE_PREFIX) && entry.name !== todaySnapshotName)
+    .sort((a, b) => b.name.localeCompare(a.name))
+    .slice(SNAPSHOT_RETENTION_DAYS - 1)
+
+  await Promise.all(staleSnapshots.map((entry) => deleteBackupFile(accessToken, entry.id)))
+
+  return latestResult
+}
+
 export async function restoreBackupFromDrive(options: {
   clientId: string
   fileId?: string | null
@@ -254,7 +329,11 @@ export async function restoreBackupFromDrive(options: {
 
   if (!fileId) {
     const existingFiles = await listBackupFiles(accessToken)
-    fileId = existingFiles[0]?.id ?? null
+    const latest = existingFiles.find((entry) => entry.name === LATEST_BACKUP_FILE_NAME)
+    const latestSnapshot = [...existingFiles]
+      .filter((entry) => entry.name.startsWith(SNAPSHOT_FILE_PREFIX))
+      .sort((a, b) => b.name.localeCompare(a.name))[0]
+    fileId = latest?.id ?? latestSnapshot?.id ?? null
   }
 
   if (!fileId) {

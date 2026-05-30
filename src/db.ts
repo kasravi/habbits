@@ -283,6 +283,18 @@ function writeLocalBackup(state: PersistedState): void {
   }
 }
 
+function removeLocalBackup(): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.removeItem(LOCAL_BACKUP_KEY)
+  } catch {
+    // Ignore backup removal failures.
+  }
+}
+
 export async function loadPersistedState(): Promise<PersistedState> {
   const backup = readLocalBackup()
 
@@ -328,6 +340,22 @@ export async function savePersistedState(state: PersistedState): Promise<void> {
     tx.onerror = () => reject(tx.error)
     tx.objectStore(STORE_NAME).put(state, APP_STATE_KEY)
   })
+}
+
+export async function clearPersistedState(): Promise<void> {
+  removeLocalBackup()
+
+  try {
+    const db = await openDb()
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite')
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+      tx.objectStore(STORE_NAME).delete(APP_STATE_KEY)
+    })
+  } catch {
+    // Ignore IndexedDB clear failures here; local wipe still removes the fallback copy.
+  }
 }
 
 export interface ExportData extends PersistedState {

@@ -2,6 +2,7 @@ import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useR
 import { type CSSProperties } from 'react'
 import * as d3 from 'd3'
 import {
+  clearPersistedState,
   type Habit,
   type HabitLog,
   type HabitPhase,
@@ -2805,7 +2806,10 @@ function App() {
       }))
       lastDriveBackupPayloadRef.current = exportPayload
       setDriveBackupStatus(
-        tx('Google Drive backup is up to date.', 'پشتیبان‌گیری گوگل‌درایو به‌روز شد.'),
+        tx(
+          'Google Drive backup is up to date. The latest file is refreshed and daily snapshots are kept for the last 3 days.',
+          'پشتیبان‌گیری گوگل‌درایو به‌روز شد. فایل اصلی تازه شد و اسنپ‌شات‌های روزانه برای ۳ روز اخیر نگه‌داری می‌شوند.',
+        ),
       )
       return true
     } catch (error) {
@@ -2937,6 +2941,72 @@ function App() {
     anchor.remove()
     URL.revokeObjectURL(url)
     setIsImportExportOpen(false)
+  }
+
+  async function wipeLocalData(): Promise<void> {
+    const confirmed = window.confirm(
+      tx(
+        'Wipe this device only? This clears local habits, logs, app storage, and cookies here. Google Drive backups stay untouched, and auto backup will be turned off so an empty state is not uploaded by mistake.',
+        'فقط داده‌های همین دستگاه پاک شود؟ این کار عادت‌ها، لاگ‌ها، ذخیره‌سازی محلی برنامه و کوکی‌های همین‌جا را پاک می‌کند. پشتیبان‌های گوگل‌درایو دست‌نخورده می‌مانند و برای جلوگیری از آپلود اشتباهی حالت خالی، پشتیبان‌گیری خودکار خاموش می‌شود.',
+      ),
+    )
+    if (!confirmed) {
+      return
+    }
+
+    await clearPersistedState()
+
+    if (typeof window !== 'undefined') {
+      for (const key of [
+        'habit-feed-language',
+        HAZE_UI_STORAGE_KEY,
+        'habit-feed-drive-backup-settings-v1',
+        'habit-feed-state-backup-v1',
+      ]) {
+        try {
+          window.localStorage.removeItem(key)
+        } catch {
+          // Ignore localStorage removal failures.
+        }
+      }
+
+      try {
+        window.sessionStorage.clear()
+      } catch {
+        // Ignore session storage cleanup failures.
+      }
+    }
+
+    if (typeof document !== 'undefined' && document.cookie) {
+      for (const cookie of document.cookie.split(';')) {
+        const name = cookie.split('=')[0]?.trim()
+        if (!name) {
+          continue
+        }
+        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`
+      }
+    }
+
+    setHabits([])
+    setLogs([])
+    setHazeUiState(defaultHazeUiState())
+    setDriveBackupSettings({
+      ...defaultDriveBackupSettings(),
+      clientId: configuredDriveClientId,
+    })
+    lastDriveBackupPayloadRef.current = ''
+    setDriveBackupStatus(
+      tx(
+        'Local data was wiped on this device. Drive backups were left alone, and auto backup is now off.',
+        'داده‌های محلی این دستگاه پاک شد. پشتیبان‌های درایو دست‌نخورده ماندند و پشتیبان‌گیری خودکار هم خاموش شد.',
+      ),
+    )
+    setRewardMessage(
+      tx(
+        'This device is clean now. You can import a file or restore from Drive.',
+        'این دستگاه حالا پاک است. می‌توانی فایل وارد کنی یا از درایو بازیابی کنی.',
+      ),
+    )
   }
 
   async function importData(event: ChangeEvent<HTMLInputElement>): Promise<void> {
@@ -3862,7 +3932,12 @@ function App() {
         <div className="overlay" role="dialog" aria-modal="true">
           <div className="modal mini-modal">
             <h3>{tx('Data tools', 'ابزار داده')}</h3>
-            <p>{tx('Export your IndexedDB data, or import from a JSON backup.', 'داده‌های IndexedDB را خروجی بگیر یا از فایل JSON وارد کن.')}</p>
+            <p>
+              {tx(
+                'Export your IndexedDB data, import from a JSON backup, or wipe this device before restoring cleanly.',
+                'از داده‌های IndexedDB خروجی بگیر، از فایل JSON وارد کن، یا قبل از بازیابی تمیز، داده‌های همین دستگاه را پاک کن.',
+              )}
+            </p>
             <div className="backup-panel">
               <h4>{tx('Google Drive backup', 'پشتیبان‌گیری گوگل‌درایو')}</h4>
               <p className="meta-line">
@@ -3976,6 +4051,12 @@ function App() {
               <p className="meta-line">
                 {tx('Last synced', 'آخرین همگام‌سازی')}: {formatRelativeDateTime(driveBackupSettings.lastSyncedAt, language)}
               </p>
+              <p className="meta-line">
+                {tx(
+                  'Drive keeps one rolling latest backup plus one snapshot per day for the last 3 days.',
+                  'درایو یک پشتیبانِ آخرین وضعیت و علاوه بر آن یک اسنپ‌شات روزانه برای ۳ روز اخیر نگه می‌دارد.',
+                )}
+              </p>
               {driveBackupSettings.lastError && (
                 <p className="backup-error">{driveBackupSettings.lastError}</p>
               )}
@@ -3989,6 +4070,9 @@ function App() {
               </button>
               <button className="secondary-btn" onClick={exportData}>
                 {tx('Export JSON', 'خروجی JSON')}
+              </button>
+              <button className="danger-btn" onClick={() => void wipeLocalData()}>
+                {tx('Wipe local data', 'پاک‌کردن داده‌های محلی')}
               </button>
               <button
                 className="primary-btn"
