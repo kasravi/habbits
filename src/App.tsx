@@ -1,4 +1,4 @@
-import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type ChangeEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type CSSProperties } from 'react'
 import * as d3 from 'd3'
 import {
@@ -12,6 +12,15 @@ import {
   savePersistedState,
   toExportData,
 } from './db'
+import {
+  type DriveBackupSettings,
+  defaultDriveBackupSettings,
+  loadDriveBackupSettings,
+  restoreBackupFromDrive,
+  saveDriveBackupSettings,
+  uploadBackupToDrive,
+} from './driveBackup'
+import { analyzeFaceSentiment } from './faceSentiment'
 import emotionsData from '../emotions.json'
 
 type TimedPhase = Exclude<HabitPhase, 'anytime'>
@@ -36,12 +45,37 @@ const REPORTING_LABELS: Record<ReportingType, string> = {
   text: 'Journal + sentiment',
   emotion: 'Emotion wheel',
   mood: 'Mood emoji',
+  photo: 'Photo journal',
+  selfie: 'Selfie + face tone',
 }
 const REPORTING_LABELS_FA: Record<ReportingType, string> = {
   button: 'دکمه ساده',
   text: 'ژورنال + احساس',
   emotion: 'چرخه احساسات',
   mood: 'ایموجی حال',
+  photo: 'ژورنال تصویری',
+  selfie: 'سلفی + حال چهره',
+}
+
+const FACE_TONE_LABELS = {
+  joyful: 'Joyful',
+  calm: 'Calm',
+  flat: 'Flat',
+  stressed: 'Stressed',
+} as const
+
+const FACE_TONE_LABELS_FA: Record<keyof typeof FACE_TONE_LABELS, string> = {
+  joyful: 'شاد',
+  calm: 'آرام',
+  flat: 'خنثی',
+  stressed: 'پرفشار',
+}
+
+const FACE_TONE_EMOJIS: Record<keyof typeof FACE_TONE_LABELS, string> = {
+  joyful: '😄',
+  calm: '🙂',
+  flat: '😐',
+  stressed: '😣',
 }
 
 const ENCOURAGEMENTS = [
@@ -188,12 +222,33 @@ interface HabitDraft {
 }
 
 interface ParsedReport {
-  type: 'button' | 'mood' | 'emotion' | 'text' | 'unknown'
+  type: 'button' | 'mood' | 'emotion' | 'text' | 'photo' | 'selfie' | 'unknown'
   mood?: number
   emotionPrimary?: string
   emotionSecondary?: string
   text?: string
   sentiment?: number
+  imageDataUrl?: string
+  caption?: string
+  faceLabel?: keyof typeof FACE_TONE_LABELS
+  faceScore?: number
+  faceAnalysisStatus?: 'pending' | 'ready' | 'unavailable'
+}
+
+interface CameraCaptureSession {
+  habitId: string
+  targetDayKey: string
+  mode: 'photo' | 'selfie'
+}
+
+interface MediaGalleryEntry {
+  logId: string
+  dayKey: string
+  completedAt: string
+  report: ParsedReport & {
+    type: 'photo' | 'selfie'
+    imageDataUrl: string
+  }
 }
 
 function defaultDraft(): HabitDraft {
@@ -340,10 +395,77 @@ function getWeekDayOffset(dayKey: string): number {
   return Math.max(0, Math.min(6, Math.floor(diffMs / (1000 * 60 * 60 * 24))))
 }
 
+function getHabitPeriodBounds(dayKey: string, phase: HabitPhase): { start: Date; end: Date } {
+  const baseDate = dayKeyToDate(dayKey)
+  const start = new Date(baseDate)
+  const end = new Date(baseDate)
+
+  if (phase === 'morning') {
+    start.setHours(2, 0, 0, 0)
+    end.setHours(16, 30, 0, 0)
+    return { start, end }
+  }
+
+  if (phase === 'afterWork') {
+    start.setHours(16, 30, 0, 0)
+    end.setHours(22, 0, 0, 0)
+    return { start, end }
+  }
+
+  if (phase === 'beforeBed') {
+    start.setHours(22, 0, 0, 0)
+    end.setDate(end.getDate() + 1)
+    end.setHours(2, 0, 0, 0)
+    return { start, end }
+  }
+
+  start.setHours(2, 0, 0, 0)
+  end.setDate(end.getDate() + 1)
+  end.setHours(2, 0, 0, 0)
+  return { start, end }
+}
+
+function getNextDailyRevealTime(
+  habit: Habit,
+  logs: HabitLog[],
+  dayKey: string,
+): Date | null {
+  const target = Math.max(1, habit.desiredFrequency.count)
+  if (habit.desiredFrequency.per !== 'day' || target <= 1) {
+    return null
+  }
+
+  const { start, end } = getHabitPeriodBounds(dayKey, habit.phase)
+  const periodMs = Math.max(1, end.getTime() - start.getTime())
+  const intervalMs = periodMs / target
+
+  const completionTimes = logs
+    .filter((log) => log.habitId === habit.id && log.dayKey === dayKey)
+    .map((log) => new Date(log.completedAt))
+    .filter((date) => !Number.isNaN(date.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime())
+
+  if (!completionTimes.length) {
+    return start
+  }
+
+  const lastCompletion = completionTimes[completionTimes.length - 1]
+  const clampedCompletionTime = Math.min(
+    Math.max(lastCompletion.getTime(), start.getTime()),
+    end.getTime(),
+  )
+  const elapsedMs = Math.max(0, clampedCompletionTime - start.getTime())
+  const nextBoundaryIndex = Math.floor(elapsedMs / intervalMs) + 1
+  const nextBoundaryTime = start.getTime() + nextBoundaryIndex * intervalMs
+
+  return new Date(Math.min(nextBoundaryTime, end.getTime()))
+}
+
 function shouldShowHabitBySchedule(
   habit: Habit,
   logs: HabitLog[],
   todayKey: string,
+  now = new Date(),
 ): boolean {
   const progress = getPeriodProgress(habit, logs, todayKey)
   if (progress.completed) {
@@ -351,6 +473,16 @@ function shouldShowHabitBySchedule(
   }
 
   if (habit.desiredFrequency.per === 'day') {
+    const currentDayKey = getEffectiveDayKey(now)
+    if (todayKey !== currentDayKey) {
+      return true
+    }
+
+    const nextRevealTime = getNextDailyRevealTime(habit, logs, todayKey)
+    if (nextRevealTime && now < nextRevealTime) {
+      return habit.phase === 'anytime' && isAnytimeUrgent(habit, todayKey, getCurrentPhase(now))
+    }
+
     return true
   }
 
@@ -621,6 +753,139 @@ function sentimentEmoji(score: number): string {
     return '🙁'
   }
   return '😐'
+}
+
+function getFaceToneLabel(
+  label: keyof typeof FACE_TONE_LABELS | undefined,
+  language: 'en' | 'fa',
+): string {
+  if (!label) {
+    return language === 'fa' ? 'نامشخص' : 'Unknown'
+  }
+
+  return language === 'fa' ? FACE_TONE_LABELS_FA[label] : FACE_TONE_LABELS[label]
+}
+
+function getFaceToneEmoji(label: keyof typeof FACE_TONE_LABELS | undefined): string {
+  if (!label) {
+    return '🙂'
+  }
+  return FACE_TONE_EMOJIS[label]
+}
+
+function getFaceAnalysisStatusLabel(
+  report: Pick<ParsedReport, 'faceAnalysisStatus' | 'faceLabel'>,
+  language: 'en' | 'fa',
+): string {
+  if (report.faceLabel) {
+    return getFaceToneLabel(report.faceLabel, language)
+  }
+
+  if (report.faceAnalysisStatus === 'pending') {
+    return language === 'fa' ? 'در حال تحلیل' : 'Analyzing'
+  }
+
+  if (report.faceAnalysisStatus === 'unavailable') {
+    return language === 'fa' ? 'ناموجود' : 'Unavailable'
+  }
+
+  return language === 'fa' ? 'نامشخص' : 'Unknown'
+}
+
+function formatRelativeDateTime(value: string | null, language: 'en' | 'fa'): string {
+  if (!value) {
+    return language === 'fa' ? 'هنوز انجام نشده' : 'Not yet'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return language === 'fa' ? 'نامشخص' : 'Unknown'
+  }
+
+  return new Intl.DateTimeFormat(language === 'fa' ? 'fa-IR' : 'en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
+}
+
+function formatDayKeyForDisplay(dayKey: string, language: 'en' | 'fa'): string {
+  const date = dayKeyToDate(dayKey)
+  return new Intl.DateTimeFormat(language === 'fa' ? 'fa-IR' : 'en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date)
+}
+
+function isMediaGalleryReport(
+  report: ParsedReport,
+): report is ParsedReport & { type: 'photo' | 'selfie'; imageDataUrl: string } {
+  return (
+    (report.type === 'photo' || report.type === 'selfie') &&
+    typeof report.imageDataUrl === 'string' &&
+    report.imageDataUrl.length > 0
+  )
+}
+
+function openImageCapture(captureMode: 'environment' | 'user'): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.setAttribute('capture', captureMode)
+
+    input.addEventListener(
+      'change',
+      () => {
+        resolve(input.files?.[0] ?? null)
+      },
+      { once: true },
+    )
+
+    input.addEventListener(
+      'cancel',
+      () => {
+        resolve(null)
+      },
+      { once: true },
+    )
+
+    input.click()
+  })
+}
+
+function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Could not read the selected image.'))
+    image.src = url
+  })
+}
+
+async function fileToCompressedImageDataUrl(file: File): Promise<string> {
+  const objectUrl = URL.createObjectURL(file)
+
+  try {
+    const image = await loadImageFromUrl(objectUrl)
+    const maxDimension = 960
+    const scale = Math.min(1, maxDimension / Math.max(image.width, image.height))
+    const width = Math.max(1, Math.round(image.width * scale))
+    const height = Math.max(1, Math.round(image.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+
+    if (!context) {
+      throw new Error('Could not open the image editor.')
+    }
+
+    context.drawImage(image, 0, 0, width, height)
+    return canvas.toDataURL('image/jpeg', 0.82)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
 
 function parseReport(reportValue: string): ParsedReport {
@@ -928,6 +1193,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 function App() {
+  const configuredDriveClientId = import.meta.env.VITE_GOOGLE_DRIVE_CLIENT_ID?.trim() ?? ''
   const [language, setLanguage] = useState<'en' | 'fa'>(() => {
     if (typeof window === 'undefined') {
       return 'en'
@@ -939,6 +1205,21 @@ function App() {
   const [logs, setLogs] = useState<HabitLog[]>([])
   const [isLoaded, setIsLoaded] = useState(false)
   const [canAutoSave, setCanAutoSave] = useState(false)
+  const [captureBusyHabitId, setCaptureBusyHabitId] = useState<string | null>(null)
+  const [cameraSession, setCameraSession] = useState<CameraCaptureSession | null>(null)
+  const [cameraStreamError, setCameraStreamError] = useState('')
+  const [cameraPreviewReady, setCameraPreviewReady] = useState(false)
+  const [driveBackupSettings, setDriveBackupSettings] = useState<DriveBackupSettings>(() => {
+    const saved = loadDriveBackupSettings()
+    return configuredDriveClientId
+      ? {
+          ...saved,
+          clientId: configuredDriveClientId,
+        }
+      : saved
+  })
+  const [driveBackupStatus, setDriveBackupStatus] = useState('')
+  const [isDriveSyncing, setIsDriveSyncing] = useState(false)
   const [rewardMessage, setRewardMessage] = useState('')
   const [isEditorOpen, setIsEditorOpen] = useState(false)
   const [isInsightsOpen, setIsInsightsOpen] = useState(false)
@@ -951,6 +1232,8 @@ function App() {
   const [showPreviousDayHabits, setShowPreviousDayHabits] = useState(false)
   const [showAnytimeHabits, setShowAnytimeHabits] = useState(false)
   const [showSecondaryAnalytics, setShowSecondaryAnalytics] = useState<Record<string, boolean>>({})
+  const [selectedMediaLogIds, setSelectedMediaLogIds] = useState<Record<string, string>>({})
+  const [galleryHabitId, setGalleryHabitId] = useState<string | null>(null)
   const [draft, setDraft] = useState<HabitDraft>(defaultDraft())
   const [cardInputs, setCardInputs] = useState<Record<string, string>>({})
   const [emotionPrimary, setEmotionPrimary] = useState<Record<string, PrimaryEmotionKey | null>>({})
@@ -961,17 +1244,41 @@ function App() {
   const ignoreAddClick = useRef(false)
   const cardLongPressTimer = useRef<number | null>(null)
   const importInputRef = useRef<HTMLInputElement | null>(null)
+  const lastDriveBackupPayloadRef = useRef('')
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null)
+  const cameraStreamRef = useRef<MediaStream | null>(null)
 
   const todayKey = useMemo(() => getEffectiveDayKey(clockNow), [clockNow])
   const yesterdayKey = useMemo(() => shiftDayKey(todayKey, -1), [todayKey])
   const currentPhase = useMemo(() => getCurrentPhase(clockNow), [clockNow])
-  const tx = (en: string, fa: string): string => (language === 'fa' ? fa : en)
+  const exportPayload = useMemo(() => JSON.stringify(toExportData({ habits, logs }), null, 2), [habits, logs])
+  const effectiveDriveClientId = configuredDriveClientId || driveBackupSettings.clientId.trim()
+  const tx = useCallback((en: string, fa: string): string => (language === 'fa' ? fa : en), [language])
 
   useEffect(() => {
     window.localStorage.setItem('habit-feed-language', language)
     document.documentElement.lang = language
     document.documentElement.dir = language === 'fa' ? 'rtl' : 'ltr'
   }, [language])
+
+  useEffect(() => {
+    saveDriveBackupSettings(driveBackupSettings)
+  }, [driveBackupSettings])
+
+  useEffect(() => {
+    if (!configuredDriveClientId) {
+      return
+    }
+
+    setDriveBackupSettings((prev) =>
+      prev.clientId === configuredDriveClientId
+        ? prev
+        : {
+            ...prev,
+            clientId: configuredDriveClientId,
+          },
+    )
+  }, [configuredDriveClientId])
 
   useEffect(() => {
     function onBeforeInstallPrompt(event: Event) {
@@ -1042,6 +1349,58 @@ function App() {
   }, [habits, logs, isLoaded, canAutoSave])
 
   useEffect(() => {
+    if (!isLoaded || !driveBackupSettings.enabled || !effectiveDriveClientId) {
+      return
+    }
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return
+    }
+
+    if (exportPayload === lastDriveBackupPayloadRef.current) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      void syncDriveBackup('auto')
+    }, 12000)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    effectiveDriveClientId,
+    driveBackupSettings.enabled,
+    exportPayload,
+    isLoaded,
+  ])
+
+  useEffect(() => {
+    if (!isLoaded || !driveBackupSettings.enabled || !effectiveDriveClientId) {
+      return
+    }
+
+    const intervalMs = Math.max(5, driveBackupSettings.intervalMinutes) * 60 * 1000
+    const timer = window.setInterval(() => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        return
+      }
+
+      if (exportPayload === lastDriveBackupPayloadRef.current) {
+        return
+      }
+
+      void syncDriveBackup('auto')
+    }, intervalMs)
+
+    return () => window.clearInterval(timer)
+  }, [
+    effectiveDriveClientId,
+    driveBackupSettings.enabled,
+    driveBackupSettings.intervalMinutes,
+    exportPayload,
+    isLoaded,
+  ])
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       setClockNow(new Date())
     }, 30000)
@@ -1056,6 +1415,77 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [rewardMessage])
 
+  useEffect(() => {
+    async function startCameraPreview(): Promise<void> {
+      if (!cameraSession) {
+        return
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraStreamError(
+          tx(
+            'Live camera preview is not available here. You can still upload a picture instead.',
+            'پیش‌نمایش زنده دوربین اینجا در دسترس نیست. هنوز می‌توانی عکس را بارگذاری کنی.',
+          ),
+        )
+        setCameraPreviewReady(false)
+        return
+      }
+
+      setCameraStreamError('')
+      setCameraPreviewReady(false)
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: cameraSession.mode === 'selfie' ? 'user' : 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        })
+
+        cameraStreamRef.current = stream
+        const video = cameraVideoRef.current
+        if (video) {
+          video.srcObject = stream
+          await video.play()
+        }
+        setCameraPreviewReady(true)
+      } catch (error) {
+        const fallbackMessage =
+          error instanceof Error && error.message
+            ? error.message
+            : tx('Could not open the camera.', 'باز کردن دوربین انجام نشد.')
+
+        setCameraStreamError(
+          tx(
+            `Could not open the camera. ${fallbackMessage}`,
+            `باز کردن دوربین انجام نشد. ${fallbackMessage}`,
+          ),
+        )
+        setCameraPreviewReady(false)
+      }
+    }
+
+    void startCameraPreview()
+
+    return () => {
+      const stream = cameraStreamRef.current
+      if (stream) {
+        for (const track of stream.getTracks()) {
+          track.stop()
+        }
+      }
+      cameraStreamRef.current = null
+      const video = cameraVideoRef.current
+      if (video) {
+        video.srcObject = null
+      }
+      setCameraPreviewReady(false)
+    }
+  }, [cameraSession, tx])
+
   const completedToday = useMemo(() => {
     const completedSet = new Set(
       logs.filter((log) => log.dayKey === todayKey).map((log) => log.habitId),
@@ -1068,7 +1498,7 @@ function App() {
 
     return habits
       .filter((habit) => !habit.archived && habit.phase !== 'anytime' && getPhaseSortIndex(habit.phase) <= currentPhaseIndex)
-      .filter((habit) => shouldShowHabitBySchedule(habit, logs, todayKey))
+      .filter((habit) => shouldShowHabitBySchedule(habit, logs, todayKey, clockNow))
       .sort((a, b) => {
         const phaseDiff = getPhaseSortIndex(b.phase) - getPhaseSortIndex(a.phase)
         if (phaseDiff !== 0) {
@@ -1076,14 +1506,14 @@ function App() {
         }
         return a.createdAt.localeCompare(b.createdAt)
       })
-  }, [habits, logs, currentPhase, todayKey])
+  }, [habits, logs, currentPhase, todayKey, clockNow])
 
   const anytimeHabits = useMemo(() => {
     return habits
       .filter((habit) => !habit.archived && habit.phase === 'anytime')
-      .filter((habit) => !getPeriodProgress(habit, logs, todayKey).completed)
+      .filter((habit) => shouldShowHabitBySchedule(habit, logs, todayKey, clockNow))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  }, [habits, logs, todayKey])
+  }, [habits, logs, todayKey, clockNow])
 
   const hasUrgentAnytimeHabits = useMemo(
     () => anytimeHabits.some((habit) => isAnytimeUrgent(habit, todayKey, currentPhase)),
@@ -1099,7 +1529,7 @@ function App() {
   const previousDayHabits = useMemo(() => {
     return habits
       .filter((habit) => !habit.archived)
-      .filter((habit) => shouldShowHabitBySchedule(habit, logs, yesterdayKey))
+      .filter((habit) => shouldShowHabitBySchedule(habit, logs, yesterdayKey, clockNow))
       .sort((a, b) => {
         const phaseDiff = getPhaseSortIndex(b.phase) - getPhaseSortIndex(a.phase)
         if (phaseDiff !== 0) {
@@ -1107,7 +1537,7 @@ function App() {
         }
         return a.createdAt.localeCompare(b.createdAt)
       })
-  }, [habits, logs, yesterdayKey])
+  }, [habits, logs, yesterdayKey, clockNow])
 
   const managedHabit = useMemo(
     () => habits.find((habit) => habit.id === editingHabitId) ?? null,
@@ -1217,6 +1647,77 @@ function App() {
     })
   }, [activeHabits, logs, todayKey])
 
+  const activeGalleryHabit = useMemo(
+    () => insightHabitsSorted.find((habit) => habit.id === galleryHabitId) ?? null,
+    [galleryHabitId, insightHabitsSorted],
+  )
+
+  const activeGalleryEntries = useMemo<MediaGalleryEntry[]>(() => {
+    if (!activeGalleryHabit) {
+      return []
+    }
+
+    return logs
+      .filter((log) => log.habitId === activeGalleryHabit.id)
+      .map((log) => ({
+        logId: log.id,
+        dayKey: log.dayKey,
+        completedAt: log.completedAt,
+        report: parseReport(log.reportValue),
+      }))
+      .filter(
+        (
+          entry,
+        ): entry is {
+          logId: string
+          dayKey: string
+          completedAt: string
+          report: ParsedReport & { type: 'photo' | 'selfie'; imageDataUrl: string }
+        } => isMediaGalleryReport(entry.report),
+      )
+      .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+  }, [activeGalleryHabit, logs])
+
+  const selectedActiveGalleryEntry = useMemo(() => {
+    if (!galleryHabitId) {
+      return null
+    }
+
+    return (
+      activeGalleryEntries.find((entry) => entry.logId === selectedMediaLogIds[galleryHabitId]) ??
+      activeGalleryEntries[0] ??
+      null
+    )
+  }, [activeGalleryEntries, galleryHabitId, selectedMediaLogIds])
+
+  useEffect(() => {
+    if (!galleryHabitId) {
+      return
+    }
+
+    if (!activeGalleryEntries.length) {
+      setGalleryHabitId(null)
+      return
+    }
+
+    const selectedLogId = selectedMediaLogIds[galleryHabitId]
+    if (!selectedLogId) {
+      setSelectedMediaLogIds((prev) => ({
+        ...prev,
+        [galleryHabitId]: activeGalleryEntries[0].logId,
+      }))
+      return
+    }
+
+    const stillExists = activeGalleryEntries.some((entry) => entry.logId === selectedLogId)
+    if (!stillExists) {
+      setSelectedMediaLogIds((prev) => ({
+        ...prev,
+        [galleryHabitId]: activeGalleryEntries[0].logId,
+      }))
+    }
+  }, [activeGalleryEntries, galleryHabitId, selectedMediaLogIds])
+
   function openAddEditor(): void {
     setEditingHabitId(null)
     setDraft(defaultDraft())
@@ -1262,28 +1763,52 @@ function App() {
     }
   }
 
-  function completeHabit(habit: Habit, report: ParsedReport, targetDayKey = todayKey): void {
+  function clearPostCompletionInputs(habitId: string): void {
+    setCardInputs((prev) => {
+      const next = { ...prev }
+      delete next[habitId]
+      return next
+    })
+    setEmotionPrimary((prev) => ({ ...prev, [habitId]: null }))
+  }
+
+  function appendHabitLog(
+    habit: Habit,
+    report: ParsedReport,
+    targetDayKey = todayKey,
+  ): HabitLog {
     if (targetDayKey === todayKey) {
       incrementStreakBreakIfNeeded(habit)
     }
 
-    setLogs((previous) => {
-      const entry: HabitLog = {
-        id: crypto.randomUUID(),
-        habitId: habit.id,
-        dayKey: targetDayKey,
-        completedAt: new Date().toISOString(),
-        reportValue: JSON.stringify(report),
-      }
-      return [...previous, entry]
-    })
+    const entry: HabitLog = {
+      id: crypto.randomUUID(),
+      habitId: habit.id,
+      dayKey: targetDayKey,
+      completedAt: new Date().toISOString(),
+      reportValue: JSON.stringify(report),
+    }
 
-    setCardInputs((prev) => {
-      const next = { ...prev }
-      delete next[habit.id]
-      return next
-    })
-    setEmotionPrimary((prev) => ({ ...prev, [habit.id]: null }))
+    setLogs((previous) => [...previous, entry])
+    clearPostCompletionInputs(habit.id)
+    return entry
+  }
+
+  function updateHabitLogReport(logId: string, report: ParsedReport): void {
+    setLogs((previous) =>
+      previous.map((log) =>
+        log.id === logId
+          ? {
+              ...log,
+              reportValue: JSON.stringify(report),
+            }
+          : log,
+      ),
+    )
+  }
+
+  function completeHabit(habit: Habit, report: ParsedReport, targetDayKey = todayKey): void {
+    appendHabitLog(habit, report, targetDayKey)
     const encouragements = language === 'fa' ? ENCOURAGEMENTS_FA : ENCOURAGEMENTS
     setRewardMessage(encouragements[Math.floor(Math.random() * encouragements.length)])
   }
@@ -1399,9 +1924,297 @@ function App() {
     setCardInputs((prev) => ({ ...prev, [habitId]: value }))
   }
 
+  function closeCameraSession(): void {
+    const stream = cameraStreamRef.current
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop()
+      }
+    }
+    cameraStreamRef.current = null
+    if (cameraVideoRef.current) {
+      cameraVideoRef.current.srcObject = null
+    }
+    setCameraPreviewReady(false)
+    setCameraStreamError('')
+    setCameraSession(null)
+    setCaptureBusyHabitId(null)
+  }
+
+  async function saveCapturedImage(
+    habit: Habit,
+    targetDayKey: string,
+    mode: 'photo' | 'selfie',
+    imageDataUrl: string,
+  ): Promise<void> {
+    const caption = (cardInputs[habit.id] ?? '').trim()
+
+    if (mode === 'photo') {
+      completeHabit(
+        habit,
+        {
+          type: 'photo',
+          imageDataUrl,
+          caption,
+        },
+        targetDayKey,
+      )
+      return
+    }
+
+    const pendingReport: ParsedReport = {
+      type: 'selfie',
+      imageDataUrl,
+      caption,
+      faceAnalysisStatus: 'pending',
+    }
+    const entry = appendHabitLog(habit, pendingReport, targetDayKey)
+    setRewardMessage(
+      tx(
+        'Selfie saved. Face tone is being analyzed in the background.',
+        'سلفی ذخیره شد. تحلیل حالِ چهره در پس‌زمینه انجام می‌شود.',
+      ),
+    )
+
+    void analyzeFaceSentiment(imageDataUrl)
+      .then((faceTone) => {
+        updateHabitLogReport(entry.id, {
+          type: 'selfie',
+          imageDataUrl,
+          caption,
+          faceLabel: faceTone?.label,
+          faceScore: faceTone?.score,
+          sentiment: faceTone?.score,
+          faceAnalysisStatus: faceTone ? 'ready' : 'unavailable',
+        })
+      })
+      .catch(() => {
+        updateHabitLogReport(entry.id, {
+          type: 'selfie',
+          imageDataUrl,
+          caption,
+          faceAnalysisStatus: 'unavailable',
+        })
+      })
+  }
+
+  async function chooseImageFromFiles(
+    habit: Habit,
+    targetDayKey: string,
+    mode: 'photo' | 'selfie',
+  ): Promise<void> {
+    const file = await openImageCapture(mode === 'photo' ? 'environment' : 'user')
+    if (!file) {
+      return
+    }
+
+    const imageDataUrl = await fileToCompressedImageDataUrl(file)
+    await saveCapturedImage(habit, targetDayKey, mode, imageDataUrl)
+  }
+
+  async function capturePhotoFromPreview(): Promise<void> {
+    if (!cameraSession) {
+      return
+    }
+
+    const video = cameraVideoRef.current
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setCameraStreamError(
+        tx(
+          'The camera preview is not ready yet. Try again in a moment.',
+          'پیش‌نمایش دوربین هنوز آماده نیست. یک لحظه دیگر دوباره تلاش کن.',
+        ),
+      )
+      return
+    }
+
+    const habit = habits.find((entry) => entry.id === cameraSession.habitId)
+    if (!habit) {
+      closeCameraSession()
+      return
+    }
+
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      const context = canvas.getContext('2d')
+      if (!context) {
+        throw new Error(tx('Could not capture this frame.', 'ثبت این فریم انجام نشد.'))
+      }
+
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const imageDataUrl = canvas.toDataURL('image/jpeg', 0.85)
+      await saveCapturedImage(habit, cameraSession.targetDayKey, cameraSession.mode, imageDataUrl)
+      closeCameraSession()
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : tx('Could not capture the photo.', 'گرفتن عکس انجام نشد.')
+      setCameraStreamError(message)
+    }
+  }
+
+  async function syncDriveBackup(reason: 'manual' | 'auto'): Promise<boolean> {
+    const clientId = effectiveDriveClientId
+    if (!clientId) {
+      setDriveBackupStatus(
+        tx(
+          'Google Drive is not configured yet. Add an app client ID first.',
+          'گوگل‌درایو هنوز پیکربندی نشده است. ابتدا شناسه کلاینت برنامه را اضافه کن.',
+        ),
+      )
+      return false
+    }
+
+    if (reason === 'auto' && isDriveSyncing) {
+      return false
+    }
+
+    setIsDriveSyncing(true)
+
+    try {
+      const result = await uploadBackupToDrive({
+        clientId,
+        content: exportPayload,
+        fileId: driveBackupSettings.fileId,
+        interactive: reason === 'manual',
+      })
+
+      const syncedAt = result.modifiedTime ?? new Date().toISOString()
+      setDriveBackupSettings((prev) => ({
+        ...prev,
+        clientId,
+        enabled: true,
+        fileId: result.fileId,
+        lastSyncedAt: syncedAt,
+        lastError: '',
+      }))
+      lastDriveBackupPayloadRef.current = exportPayload
+      setDriveBackupStatus(
+        tx('Google Drive backup is up to date.', 'پشتیبان‌گیری گوگل‌درایو به‌روز شد.'),
+      )
+      return true
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : tx('Drive backup failed.', 'پشتیبان‌گیری درایو انجام نشد.')
+      setDriveBackupSettings((prev) => ({
+        ...prev,
+        lastError: message,
+      }))
+      setDriveBackupStatus(message)
+      return false
+    } finally {
+      setIsDriveSyncing(false)
+    }
+  }
+
+  async function restoreFromGoogleDrive(): Promise<void> {
+    const clientId = effectiveDriveClientId
+    if (!clientId) {
+      setDriveBackupStatus(
+        tx(
+          'Google Drive is not configured yet. Add an app client ID first.',
+          'گوگل‌درایو هنوز پیکربندی نشده است. ابتدا شناسه کلاینت برنامه را اضافه کن.',
+        ),
+      )
+      return
+    }
+
+    setIsDriveSyncing(true)
+
+    try {
+      const restored = await restoreBackupFromDrive({
+        clientId,
+        fileId: driveBackupSettings.fileId,
+        interactive: true,
+      })
+      const imported = fromImportedData(restored.state)
+      if (!imported) {
+        throw new Error(tx('The Drive backup file is invalid.', 'فایل پشتیبان درایو معتبر نیست.'))
+      }
+
+      setHabits(imported.habits)
+      setLogs(imported.logs)
+      const restoredAt = new Date().toISOString()
+      setDriveBackupSettings((prev) => ({
+        ...prev,
+        clientId,
+        enabled: true,
+        fileId: restored.fileId,
+        lastSyncedAt: restoredAt,
+        lastError: '',
+      }))
+      lastDriveBackupPayloadRef.current = JSON.stringify(toExportData(imported), null, 2)
+      setDriveBackupStatus(
+        tx('Drive backup restored into this device.', 'پشتیبان درایو روی این دستگاه بازیابی شد.'),
+      )
+      setRewardMessage(
+        tx('Your latest Drive backup is back in place.', 'آخرین پشتیبان درایو دوباره سر جایش قرار گرفت.'),
+      )
+      setIsImportExportOpen(false)
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : tx('Could not restore from Google Drive.', 'بازیابی از گوگل‌درایو انجام نشد.')
+      setDriveBackupSettings((prev) => ({
+        ...prev,
+        lastError: message,
+      }))
+      setDriveBackupStatus(message)
+    } finally {
+      setIsDriveSyncing(false)
+    }
+  }
+
+  function resetDriveBackup(): void {
+    setDriveBackupSettings({
+      ...defaultDriveBackupSettings(),
+      clientId: configuredDriveClientId,
+    })
+    setDriveBackupStatus(
+      tx(
+        'Drive backup settings cleared for this device.',
+        'تنظیمات پشتیبان‌گیری درایو برای این دستگاه پاک شد.',
+      ),
+    )
+    lastDriveBackupPayloadRef.current = ''
+  }
+
+  async function handleCameraReport(
+    habit: Habit,
+    targetDayKey: string,
+    mode: 'photo' | 'selfie',
+  ): Promise<void> {
+    try {
+      setCaptureBusyHabitId(habit.id)
+      if (typeof navigator.mediaDevices?.getUserMedia === 'function') {
+        setCameraSession({
+          habitId: habit.id,
+          targetDayKey,
+          mode,
+        })
+        return
+      }
+
+      await chooseImageFromFiles(habit, targetDayKey, mode)
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : tx('Could not process the selected photo.', 'عکس انتخاب‌شده پردازش نشد.')
+      alert(message)
+    } finally {
+      setCaptureBusyHabitId(null)
+    }
+  }
+
   function exportData(): void {
-    const payload = JSON.stringify(toExportData({ habits, logs }), null, 2)
-    const blob = new Blob([payload], { type: 'application/json' })
+    const blob = new Blob([exportPayload], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
@@ -1637,6 +2450,72 @@ function App() {
                 }}
               >
                 {tx('Save journal entry', 'ثبت یادداشت')}
+              </button>
+            </>
+          )}
+
+          {habit.reportingType === 'photo' && (
+            <>
+              <label className="field-label" htmlFor={`photo-caption-${habit.id}-${targetDayKey}`}>
+                {tx('Photo note (optional)', 'یادداشت عکس (اختیاری)')}
+              </label>
+              <textarea
+                id={`photo-caption-${habit.id}-${targetDayKey}`}
+                className="text-input text-area"
+                placeholder={
+                  isTodayCard
+                    ? tx('What does this photo capture today?', 'این عکس امروز چه چیزی را ثبت می‌کند؟')
+                    : tx('Add a short note for this catch-up photo…', 'برای این عکس جبرانی یک توضیح کوتاه بنویس…')
+                }
+                value={cardInputs[habit.id] ?? ''}
+                onChange={(event) => updateCardInput(habit.id, event.target.value)}
+              />
+              <button
+                className="primary-btn"
+                disabled={captureBusyHabitId === habit.id}
+                onClick={() => {
+                  void handleCameraReport(habit, targetDayKey, 'photo')
+                }}
+              >
+                {captureBusyHabitId === habit.id
+                  ? tx('Opening camera…', 'در حال باز کردن دوربین…')
+                  : tx('Take photo journal', 'ثبت ژورنال تصویری')}
+              </button>
+            </>
+          )}
+
+          {habit.reportingType === 'selfie' && (
+            <>
+              <label className="field-label" htmlFor={`selfie-caption-${habit.id}-${targetDayKey}`}>
+                {tx('Selfie note (optional)', 'یادداشت سلفی (اختیاری)')}
+              </label>
+              <textarea
+                id={`selfie-caption-${habit.id}-${targetDayKey}`}
+                className="text-input text-area"
+                placeholder={
+                  isTodayCard
+                    ? tx('Add context for this moment if you want…', 'اگر دوست داری برای این لحظه توضیح بنویس…')
+                    : tx('Add context for this catch-up selfie…', 'برای این سلفی جبرانی توضیح کوتاهی بنویس…')
+                }
+                value={cardInputs[habit.id] ?? ''}
+                onChange={(event) => updateCardInput(habit.id, event.target.value)}
+              />
+              <p className="meta-line camera-helper">
+                {tx(
+                  'A lightweight on-device face read estimates a rough tone. It is only a cue, not a diagnosis.',
+                  'یک خوانش سبکِ روی دستگاه، حال تقریبی چهره را حدس می‌زند. فقط یک نشانه است، نه تشخیص.',
+                )}
+              </p>
+              <button
+                className="primary-btn"
+                disabled={captureBusyHabitId === habit.id}
+                onClick={() => {
+                  void handleCameraReport(habit, targetDayKey, 'selfie')
+                }}
+              >
+                {captureBusyHabitId === habit.id
+                  ? tx('Opening camera…', 'در حال باز کردن دوربین…')
+                  : tx('Take selfie + read tone', 'گرفتن سلفی + خواندن حال')}
               </button>
             </>
           )}
@@ -1942,6 +2821,15 @@ function App() {
                 .filter((log) => log.habitId === managedHabit.id)
                 .map((log) => parseReport(log.reportValue))
                 .filter((report) => report.type === 'text' && report.text)
+              const photoLogs = logs
+                .filter((log) => log.habitId === managedHabit.id)
+                .map((log) => parseReport(log.reportValue))
+                .filter((report) => report.type === 'photo' && report.imageDataUrl)
+              const selfieLogs = logs
+                .filter((log) => log.habitId === managedHabit.id)
+                .map((log) => parseReport(log.reportValue))
+                .filter((report) => report.type === 'selfie')
+              const latestSelfie = selfieLogs.at(-1)
 
               const sentimentSeries = textLogs
                 .slice(-8)
@@ -2048,6 +2936,47 @@ function App() {
                       )}
                     </div>
                   )}
+
+                  {managedHabit.reportingType === 'photo' && (
+                    <div className="sentiment-panel">
+                      <p className="field-label">{tx('Photo journal rhythm', 'ریتم ژورنال تصویری')}</p>
+                      <p className="meta-line">
+                        {tx('Saved photos', 'عکس‌های ذخیره‌شده')}: <strong>{photoLogs.length}</strong>
+                      </p>
+                      <p className="meta-line">
+                        {tx(
+                          'Photos are kept inside the habit log and will be included in exports and Drive backups.',
+                          'عکس‌ها داخل لاگ عادت نگه‌داری می‌شوند و در خروجی و پشتیبان درایو هم می‌آیند.',
+                        )}
+                      </p>
+                    </div>
+                  )}
+
+                  {managedHabit.reportingType === 'selfie' && (
+                    <div className="sentiment-panel">
+                      <p className="field-label">{tx('Face tone trend', 'روند حال چهره')}</p>
+                      <p className="trend-row">
+                        {selfieLogs.length
+                          ? selfieLogs.slice(-8).map((report, index) => (
+                              <span key={`${managedHabit.id}-selfie-${index}`}>
+                                {getFaceToneEmoji(report.faceLabel)}
+                              </span>
+                            ))
+                          : tx('No selfie tone logs yet', 'هنوز ثبت حالِ سلفی نداری')}
+                      </p>
+                      {latestSelfie && (
+                        <p className="meta-line">
+                          {tx('Latest tone', 'آخرین حال')}: <strong>{getFaceAnalysisStatusLabel(latestSelfie, language)}</strong>
+                        </p>
+                      )}
+                      <p className="meta-line">
+                        {tx(
+                          'The face read is a rough mood cue from blendshapes, not a medical or psychological judgment.',
+                          'خوانش چهره فقط یک نشانه تقریبی از حال است و قضاوت پزشکی یا روان‌شناختی نیست.',
+                        )}
+                      </p>
+                    </div>
+                  )}
                 </div>
               )
             })()}
@@ -2078,6 +3007,126 @@ function App() {
           <div className="modal mini-modal">
             <h3>{tx('Data tools', 'ابزار داده')}</h3>
             <p>{tx('Export your IndexedDB data, or import from a JSON backup.', 'داده‌های IndexedDB را خروجی بگیر یا از فایل JSON وارد کن.')}</p>
+            <div className="backup-panel">
+              <h4>{tx('Google Drive backup', 'پشتیبان‌گیری گوگل‌درایو')}</h4>
+              <p className="meta-line">
+                {configuredDriveClientId
+                  ? tx(
+                      'Click connect once and Google will handle sign-in in a popup. After that, backups can happen automatically while the app is open.',
+                      'یک‌بار روی اتصال بزن و گوگل ورود را در پنجره پاپ‌آپ انجام می‌دهد. بعد از آن، تا وقتی برنامه باز است پشتیبان‌گیری می‌تواند خودکار انجام شود.',
+                    )
+                  : tx(
+                      'This app needs a Google OAuth client ID from its owner. If you self-host it, add one once in an env file. End users should not have to look this up.',
+                      'این برنامه به شناسه کلاینت OAuth گوگل از طرف سازنده نیاز دارد. اگر برنامه را خودت میزبانی می‌کنی، آن را یک‌بار در فایل env قرار بده. کاربر نهایی نباید دنبال آن بگردد.',
+                    )}
+              </p>
+
+              {!configuredDriveClientId && (
+                <>
+                  <label className="field-label" htmlFor="drive-client-id">
+                    {tx('Google OAuth client ID', 'شناسه کلاینت OAuth گوگل')}
+                  </label>
+                  <input
+                    id="drive-client-id"
+                    className="text-input"
+                    value={driveBackupSettings.clientId}
+                    placeholder="1234567890-abcdef.apps.googleusercontent.com"
+                    onChange={(event) =>
+                      setDriveBackupSettings((prev) => ({
+                        ...prev,
+                        clientId: event.target.value,
+                        lastError: '',
+                      }))
+                    }
+                  />
+                </>
+              )}
+
+              {configuredDriveClientId && (
+                <p className="backup-ok">
+                  {tx(
+                    'Google Drive sign-in is preconfigured by the app.',
+                    'ورود گوگل‌درایو از قبل توسط برنامه پیکربندی شده است.',
+                  )}
+                </p>
+              )}
+
+              <div className="inline-fields backup-inline-fields">
+                <label className="backup-toggle">
+                  <input
+                    type="checkbox"
+                    checked={driveBackupSettings.enabled}
+                    onChange={(event) =>
+                      setDriveBackupSettings((prev) => ({
+                        ...prev,
+                        enabled: event.target.checked,
+                      }))
+                    }
+                  />
+                  <span>{tx('Enable auto backup', 'فعال‌کردن پشتیبان‌گیری خودکار')}</span>
+                </label>
+
+                <div>
+                  <label className="field-label" htmlFor="drive-interval">
+                    {tx('Backup cadence', 'بازه پشتیبان‌گیری')}
+                  </label>
+                  <select
+                    id="drive-interval"
+                    className="text-input"
+                    value={driveBackupSettings.intervalMinutes}
+                    onChange={(event) =>
+                      setDriveBackupSettings((prev) => ({
+                        ...prev,
+                        intervalMinutes: Number(event.target.value) || 60,
+                      }))
+                    }
+                  >
+                    <option value={15}>{tx('About every 15 minutes', 'حدود هر ۱۵ دقیقه')}</option>
+                    <option value={60}>{tx('About every hour', 'حدود هر ۱ ساعت')}</option>
+                    <option value={360}>{tx('About every 6 hours', 'حدود هر ۶ ساعت')}</option>
+                    <option value={1440}>{tx('About every day', 'حدود هر روز')}</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="backup-actions">
+                <button
+                  className="secondary-btn"
+                  disabled={isDriveSyncing}
+                  onClick={() => {
+                    void syncDriveBackup('manual')
+                  }}
+                >
+                  {isDriveSyncing
+                    ? tx('Syncing…', 'در حال همگام‌سازی…')
+                    : !driveBackupSettings.lastSyncedAt && configuredDriveClientId
+                      ? tx('Connect Google Drive', 'اتصال به گوگل‌درایو')
+                      : tx('Back up now', 'همین حالا پشتیبان بگیر')}
+                </button>
+                <button
+                  className="secondary-btn"
+                  disabled={isDriveSyncing}
+                  onClick={() => {
+                    void restoreFromGoogleDrive()
+                  }}
+                >
+                  {tx('Restore latest Drive backup', 'بازیابی آخرین پشتیبان درایو')}
+                </button>
+                <button className="danger-btn" onClick={resetDriveBackup}>
+                  {tx('Clear Drive setup', 'پاک‌کردن تنظیمات درایو')}
+                </button>
+              </div>
+
+              <p className="meta-line">
+                {tx('Last synced', 'آخرین همگام‌سازی')}: {formatRelativeDateTime(driveBackupSettings.lastSyncedAt, language)}
+              </p>
+              {driveBackupSettings.lastError && (
+                <p className="backup-error">{driveBackupSettings.lastError}</p>
+              )}
+              {driveBackupStatus && !driveBackupSettings.lastError && (
+                <p className="backup-ok">{driveBackupStatus}</p>
+              )}
+            </div>
             <div className="modal-actions">
               <button className="secondary-btn" onClick={() => setIsImportExportOpen(false)}>
                 {tx('Close', 'بستن')}
@@ -2234,6 +3283,54 @@ function App() {
                     text: report.text ?? '',
                     sentiment: report.sentiment ?? analyzeSentiment(report.text ?? ''),
                   }))
+                const mediaReports = logs
+                  .filter((log) => log.habitId === habit.id)
+                  .map((log) => ({
+                    logId: log.id,
+                    dayKey: log.dayKey,
+                    completedAt: log.completedAt,
+                    report: parseReport(log.reportValue),
+                  }))
+                  .filter(
+                    (
+                      entry,
+                    ): entry is {
+                      logId: string
+                      dayKey: string
+                      completedAt: string
+                      report: ParsedReport & { type: 'photo' | 'selfie'; imageDataUrl: string }
+                    } => isMediaGalleryReport(entry.report),
+                  )
+                  .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+                const selectedMediaReport =
+                  mediaReports.find((entry) => entry.logId === selectedMediaLogIds[habit.id]) ??
+                  mediaReports[0] ??
+                  null
+                const selfieCounts = {
+                  joyful: 0,
+                  calm: 0,
+                  flat: 0,
+                  stressed: 0,
+                }
+                for (const report of habitReports) {
+                  if (report.type === 'selfie' && report.faceLabel) {
+                    selfieCounts[report.faceLabel] += 1
+                  }
+                }
+                const selfieData: MiniBarDatum[] = (
+                  Object.keys(FACE_TONE_LABELS) as Array<keyof typeof FACE_TONE_LABELS>
+                ).map((label) => ({
+                  label: `${getFaceToneEmoji(label)} ${getFaceToneLabel(label, language)}`,
+                  value: selfieCounts[label],
+                  color:
+                    label === 'joyful'
+                      ? '#34d399'
+                      : label === 'calm'
+                        ? '#60a5fa'
+                        : label === 'flat'
+                          ? '#94a3b8'
+                          : '#f87171',
+                }))
 
                 const wordStats = new Map<string, { count: number; sentimentSum: number }>()
                 for (const report of textReports) {
@@ -2278,7 +3375,9 @@ function App() {
                 const hasSecondaryAnalytics =
                   (habit.reportingType === 'mood' && moodData.some((entry) => entry.value > 0)) ||
                   (habit.reportingType === 'emotion' && emotionData.some((entry) => entry.value > 0)) ||
-                  (habit.reportingType === 'text' && termsData.length > 0)
+                  (habit.reportingType === 'text' && termsData.length > 0) ||
+                  (habit.reportingType === 'photo' && mediaReports.length > 0) ||
+                  (habit.reportingType === 'selfie' && (selfieData.some((entry) => entry.value > 0) || mediaReports.length > 0))
                 const secondaryVisible = Boolean(showSecondaryAnalytics[habit.id])
                 const insightCardStyle = {
                   '--insight-progress': `${stage.progressPct.toFixed(1)}%`,
@@ -2424,6 +3523,69 @@ function App() {
                           </div>
                         )}
 
+                        {secondaryVisible &&
+                          (habit.reportingType === 'photo' || habit.reportingType === 'selfie') &&
+                          selectedMediaReport && (
+                            <div className="chart-block discrete-block">
+                              <button
+                                type="button"
+                                className="media-preview-card"
+                                onClick={() => {
+                                  setSelectedMediaLogIds((prev) => ({
+                                    ...prev,
+                                    [habit.id]: selectedMediaReport.logId,
+                                  }))
+                                  setGalleryHabitId(habit.id)
+                                }}
+                              >
+                                <img
+                                  src={selectedMediaReport.report.imageDataUrl}
+                                  alt={tx('Saved habit snapshot', 'تصویر ذخیره‌شده عادت')}
+                                  className="media-preview-image"
+                                />
+                                <span className="media-preview-copy">
+                                  <strong>
+                                    {tx('Latest saved moment', 'آخرین لحظه ذخیره‌شده')} ·{' '}
+                                    {formatDayKeyForDisplay(selectedMediaReport.dayKey, language)}
+                                  </strong>
+                                  <span>
+                                    {formatRelativeDateTime(selectedMediaReport.completedAt, language)}
+                                  </span>
+                                  {selectedMediaReport.report.caption && (
+                                    <span>{selectedMediaReport.report.caption}</span>
+                                  )}
+                                  {selectedMediaReport.report.type === 'selfie' && (
+                                    <span>
+                                      {tx('Face tone', 'حال چهره')}: {getFaceToneEmoji(selectedMediaReport.report.faceLabel)}{' '}
+                                      {getFaceAnalysisStatusLabel(selectedMediaReport.report, language)}
+                                      {typeof selectedMediaReport.report.faceScore === 'number' && (
+                                        <>
+                                          {' '}
+                                          · {tx('score', 'امتیاز')} {selectedMediaReport.report.faceScore.toFixed(2)}
+                                        </>
+                                      )}
+                                    </span>
+                                  )}
+                                  <span className="media-preview-hint">
+                                    {tx('Tap to open gallery and pick another day.', 'برای باز کردن گالری و انتخاب روز دیگر لمس کن.')}
+                                  </span>
+                                </span>
+                              </button>
+                            </div>
+                          )}
+
+                        {secondaryVisible && habit.reportingType === 'selfie' && selfieData.length > 0 && (
+                          <div className="chart-block discrete-block">
+                            <D3VerticalBars data={selfieData} fallbackColor="#60a5fa" />
+                            <p className="meta-line">
+                              {tx(
+                                'These face-tone buckets come from an on-device blendshape heuristic.',
+                                'این دسته‌های حالِ چهره از یک حدس مبتنی بر بلِندشیپ روی خود دستگاه می‌آیند.',
+                              )}
+                            </p>
+                          </div>
+                        )}
+
                         {latestSrhiAverage !== null && (
                           <p className="meta-line">
                             {tx('Latest SRHI', 'آخرین SRHI')}: {latestSrhiAverage.toFixed(2)}
@@ -2438,6 +3600,75 @@ function App() {
 
             <div className="modal-actions">
               <button className="secondary-btn" onClick={() => setIsInsightsOpen(false)}>
+                {tx('Close', 'بستن')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {galleryHabitId && activeGalleryHabit && selectedActiveGalleryEntry && (
+        <div className="overlay" role="dialog" aria-modal="true">
+          <div className="modal media-gallery-modal">
+            <h3>{tx('Media gallery', 'گالری رسانه')}</h3>
+            <p className="meta-line">
+              {activeGalleryHabit.name} · {getReportingLabel(activeGalleryHabit.reportingType, language)}
+            </p>
+
+            <div className="media-gallery-focus">
+              <img
+                src={selectedActiveGalleryEntry.report.imageDataUrl}
+                alt={tx('Selected habit media', 'رسانه انتخاب‌شده عادت')}
+                className="media-gallery-focus-image"
+              />
+              <div className="media-gallery-focus-copy">
+                <strong>{formatDayKeyForDisplay(selectedActiveGalleryEntry.dayKey, language)}</strong>
+                <span>{formatRelativeDateTime(selectedActiveGalleryEntry.completedAt, language)}</span>
+                {selectedActiveGalleryEntry.report.caption ? (
+                  <p>{selectedActiveGalleryEntry.report.caption}</p>
+                ) : (
+                  <p>{tx('No note saved for this moment.', 'برای این لحظه یادداشتی ذخیره نشده است.')}</p>
+                )}
+
+                {selectedActiveGalleryEntry.report.type === 'selfie' && (
+                  <p className="meta-line">
+                    {tx('Face tone', 'حال چهره')}: {getFaceToneEmoji(selectedActiveGalleryEntry.report.faceLabel)}{' '}
+                    {getFaceAnalysisStatusLabel(selectedActiveGalleryEntry.report, language)}
+                    {typeof selectedActiveGalleryEntry.report.faceScore === 'number' && (
+                      <>
+                        {' '}
+                        · {tx('score', 'امتیاز')} {selectedActiveGalleryEntry.report.faceScore.toFixed(2)}
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="media-gallery-grid">
+              {activeGalleryEntries.map((entry) => {
+                const isSelected = entry.logId === selectedActiveGalleryEntry.logId
+                return (
+                  <button
+                    key={entry.logId}
+                    type="button"
+                    className={`media-gallery-thumb ${isSelected ? 'selected-media-thumb' : ''}`}
+                    onClick={() =>
+                      setSelectedMediaLogIds((prev) => ({
+                        ...prev,
+                        [activeGalleryHabit.id]: entry.logId,
+                      }))
+                    }
+                  >
+                    <img src={entry.report.imageDataUrl} alt={formatDayKeyForDisplay(entry.dayKey, language)} />
+                    <span>{formatDayKeyForDisplay(entry.dayKey, language)}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="modal-actions">
+              <button className="secondary-btn" onClick={() => setGalleryHabitId(null)}>
                 {tx('Close', 'بستن')}
               </button>
             </div>
@@ -2488,6 +3719,85 @@ function App() {
               </button>
               <button className="primary-btn" onClick={saveSrhiReport}>
                 {tx('Submit SRHI', 'ثبت SRHI')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cameraSession && (
+        <div className="overlay" role="dialog" aria-modal="true">
+          <div className="modal camera-modal">
+            <h3>
+              {cameraSession.mode === 'selfie'
+                ? tx('Take a selfie', 'گرفتن سلفی')
+                : tx('Take a photo', 'گرفتن عکس')}
+            </h3>
+            <p className="meta-line">
+              {cameraSession.mode === 'selfie'
+                ? tx(
+                    'Use the webcam to capture a selfie, or switch to file upload if you prefer.',
+                    'از وب‌کم برای گرفتن سلفی استفاده کن، یا اگر خواستی به‌جایش فایل بارگذاری کن.',
+                  )
+                : tx(
+                    'Use the webcam to capture a photo journal shot, or switch to file upload if you prefer.',
+                    'از وب‌کم برای گرفتن عکس ژورنال استفاده کن، یا اگر خواستی به‌جایش فایل بارگذاری کن.',
+                  )}
+            </p>
+
+            <div className="camera-preview-shell">
+              <video
+                ref={cameraVideoRef}
+                className="camera-preview"
+                autoPlay
+                muted
+                playsInline
+              />
+              {!cameraPreviewReady && (
+                <div className="camera-preview-placeholder">
+                  {cameraStreamError ||
+                    tx('Waiting for the camera preview…', 'در انتظار پیش‌نمایش دوربین…')}
+                </div>
+              )}
+            </div>
+
+            {cameraStreamError && <p className="backup-error">{cameraStreamError}</p>}
+
+            <div className="modal-actions">
+              <button className="secondary-btn" onClick={closeCameraSession}>
+                {tx('Cancel', 'انصراف')}
+              </button>
+              <button
+                className="secondary-btn"
+                onClick={() => {
+                  const habit = habits.find((entry) => entry.id === cameraSession.habitId)
+                  if (!habit) {
+                    closeCameraSession()
+                    return
+                  }
+                  void chooseImageFromFiles(habit, cameraSession.targetDayKey, cameraSession.mode)
+                    .then(() => closeCameraSession())
+                    .catch((error: unknown) => {
+                      const message =
+                        error instanceof Error
+                          ? error.message
+                          : tx('Could not process the selected photo.', 'عکس انتخاب‌شده پردازش نشد.')
+                      setCameraStreamError(message)
+                    })
+                }}
+              >
+                {tx('Upload instead', 'بارگذاری به‌جایش')}
+              </button>
+              <button
+                className="primary-btn"
+                disabled={!cameraPreviewReady}
+                onClick={() => {
+                  void capturePhotoFromPreview()
+                }}
+              >
+                {cameraSession.mode === 'selfie'
+                  ? tx('Capture selfie', 'ثبت سلفی')
+                  : tx('Capture photo', 'ثبت عکس')}
               </button>
             </div>
           </div>

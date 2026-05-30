@@ -1,5 +1,5 @@
 export type HabitPhase = 'morning' | 'afterWork' | 'beforeBed' | 'anytime'
-export type ReportingType = 'button' | 'text' | 'emotion' | 'mood'
+export type ReportingType = 'button' | 'text' | 'emotion' | 'mood' | 'photo' | 'selfie'
 export type FrequencyPeriod = 'day' | 'week'
 
 export interface DesiredFrequency {
@@ -184,7 +184,9 @@ function normalizeHabit(value: unknown): Habit | null {
       habit.reportingType === 'button' ||
       habit.reportingType === 'text' ||
       habit.reportingType === 'emotion' ||
-      habit.reportingType === 'mood'
+      habit.reportingType === 'mood' ||
+      habit.reportingType === 'photo' ||
+      habit.reportingType === 'selfie'
         ? habit.reportingType
         : 'button',
     srhiReports: normalizeSrhiReports(habit.srhiReports, habit.srhiScores),
