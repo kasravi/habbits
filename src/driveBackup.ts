@@ -14,6 +14,8 @@ export interface DriveBackupResult {
   modifiedTime?: string
 }
 
+export const DRIVE_REAUTH_REQUIRED_MESSAGE = 'Google Drive needs you to reconnect manually.'
+
 const SETTINGS_KEY = 'habit-feed-drive-backup-settings-v1'
 const LATEST_BACKUP_FILE_NAME = 'habit-feed-backup.json'
 const SNAPSHOT_FILE_PREFIX = 'habit-feed-backup-snapshot-'
@@ -28,6 +30,7 @@ interface DriveFileRecord {
 
 interface GoogleTokenResponse {
   access_token?: string
+  expires_in?: number
   error?: string
   error_description?: string
 }
@@ -104,6 +107,11 @@ export function saveDriveBackupSettings(settings: DriveBackupSettings): void {
 }
 
 let googleScriptPromise: Promise<void> | null = null
+let accessTokenCache: {
+  clientId: string
+  token: string
+  expiresAt: number
+} | null = null
 
 function ensureGoogleScript(): Promise<void> {
   if (typeof window === 'undefined') {
@@ -142,6 +150,14 @@ function ensureGoogleScript(): Promise<void> {
 async function getAccessToken(clientId: string, interactive: boolean): Promise<string> {
   await ensureGoogleScript()
 
+  if (
+    accessTokenCache &&
+    accessTokenCache.clientId === clientId &&
+    accessTokenCache.expiresAt > Date.now() + 30_000
+  ) {
+    return accessTokenCache.token
+  }
+
   const requestToken = (prompt: string): Promise<string> =>
     new Promise((resolve, reject) => {
       const oauth = window.google?.accounts?.oauth2
@@ -155,8 +171,18 @@ async function getAccessToken(clientId: string, interactive: boolean): Promise<s
         scope: DRIVE_SCOPE,
         callback: (response) => {
           if (response.error || !response.access_token) {
-            reject(new Error(response.error_description || response.error || 'Google authorization failed.'))
+            const errorText = response.error_description || response.error || 'Google authorization failed.'
+            if (!interactive) {
+              reject(new Error(DRIVE_REAUTH_REQUIRED_MESSAGE))
+              return
+            }
+            reject(new Error(errorText))
             return
+          }
+          accessTokenCache = {
+            clientId,
+            token: response.access_token,
+            expiresAt: Date.now() + Math.max(60, response.expires_in ?? 3600) * 1000,
           }
           resolve(response.access_token)
         },
@@ -169,7 +195,11 @@ async function getAccessToken(clientId: string, interactive: boolean): Promise<s
     return requestToken('consent')
   }
 
-  return requestToken('')
+  return requestToken('none')
+}
+
+export function clearDriveAccessTokenCache(): void {
+  accessTokenCache = null
 }
 
 function formatDayKey(date: Date): string {

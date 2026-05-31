@@ -14,6 +14,8 @@ import {
   toExportData,
 } from './db'
 import {
+  DRIVE_REAUTH_REQUIRED_MESSAGE,
+  clearDriveAccessTokenCache,
   type DriveBackupSettings,
   defaultDriveBackupSettings,
   loadDriveBackupSettings,
@@ -1303,7 +1305,19 @@ function StrengthLineChart({
         const x0 = rangeStartX(range.startIndex)
         const x1 = rangeEndX(range.endIndex)
         const width = Math.max(10, x1 - x0)
+        const edgeFadeWidthPercent = width < 80 ? 22 : 14
+        const edgeBleed = Math.max(10, width * (edgeFadeWidthPercent / 100) * 0.75)
+        const seriesFadeWidth = Math.max(12, edgeBleed * 0.8)
+        const seriesFadeY = 40
+        const seriesFadeHeight = Math.max(0, innerHeight - seriesFadeY)
+        const fogX0 = Math.max(0, x0 - edgeBleed)
+        const fogX1 = Math.min(innerWidth, x1 + edgeBleed)
+        const fogWidth = Math.max(10, fogX1 - fogX0)
         const gradientId = `fog-gradient-${Math.random().toString(36).slice(2, 9)}`
+        const edgeGradientId = `fog-edge-gradient-${Math.random().toString(36).slice(2, 9)}`
+        const maskId = `fog-mask-${Math.random().toString(36).slice(2, 9)}`
+        const leftSeriesFadeId = `series-fade-left-${Math.random().toString(36).slice(2, 9)}`
+        const rightSeriesFadeId = `series-fade-right-${Math.random().toString(36).slice(2, 9)}`
         const hazeRgb = '231, 254, 134'
 
         const fogTopOpacity =
@@ -1329,51 +1343,124 @@ function StrengthLineChart({
           .attr('offset', '100%')
           .attr('stop-color', `rgba(${hazeRgb}, ${fogBottomOpacity})`)
 
+        const edgeGradient = defs
+          .append('linearGradient')
+          .attr('id', edgeGradientId)
+          .attr('x1', '0%')
+          .attr('y1', '0%')
+          .attr('x2', '100%')
+          .attr('y2', '0%')
+
+        edgeGradient
+          .append('stop')
+          .attr('offset', '0%')
+          .attr('stop-color', 'rgba(255,255,255,0)')
+
+        edgeGradient
+          .append('stop')
+          .attr('offset', `${edgeFadeWidthPercent}%`)
+          .attr('stop-color', 'rgba(255,255,255,1)')
+
+        edgeGradient
+          .append('stop')
+          .attr('offset', `${100 - edgeFadeWidthPercent}%`)
+          .attr('stop-color', 'rgba(255,255,255,1)')
+
+        edgeGradient
+          .append('stop')
+          .attr('offset', '100%')
+          .attr('stop-color', 'rgba(255,255,255,0)')
+
+        defs
+          .append('mask')
+          .attr('id', maskId)
+          .append('rect')
+          .attr('x', fogX0)
+          .attr('y', 0)
+          .attr('width', fogWidth)
+          .attr('height', innerHeight)
+          .attr('rx', 10)
+          .attr('fill', `url(#${edgeGradientId})`)
+
+        if (!showUnderFogDetails) {
+          const leftSeriesFade = defs
+            .append('linearGradient')
+            .attr('id', leftSeriesFadeId)
+            .attr('x1', '0%')
+            .attr('y1', '0%')
+            .attr('x2', '100%')
+            .attr('y2', '0%')
+
+          leftSeriesFade
+            .append('stop')
+            .attr('offset', '0%')
+            .attr('stop-color', 'rgba(255,255,255,0)')
+
+          leftSeriesFade
+            .append('stop')
+            .attr('offset', '100%')
+            .attr('stop-color', 'rgba(255,255,255,0.34)')
+
+          const rightSeriesFade = defs
+            .append('linearGradient')
+            .attr('id', rightSeriesFadeId)
+            .attr('x1', '0%')
+            .attr('y1', '0%')
+            .attr('x2', '100%')
+            .attr('y2', '0%')
+
+          rightSeriesFade
+            .append('stop')
+            .attr('offset', '0%')
+            .attr('stop-color', 'rgba(255,255,255,0.34)')
+
+          rightSeriesFade
+            .append('stop')
+            .attr('offset', '100%')
+            .attr('stop-color', 'rgba(255,255,255,0)')
+
+          if (x0 > 0 && seriesFadeHeight > 0) {
+            root
+              .append('rect')
+              .attr('x', Math.max(0, x0 - seriesFadeWidth))
+              .attr('y', seriesFadeY)
+              .attr('width', Math.min(seriesFadeWidth, x0))
+              .attr('height', seriesFadeHeight)
+              .attr('fill', `url(#${leftSeriesFadeId})`)
+          }
+
+          if (x1 < innerWidth && seriesFadeHeight > 0) {
+            root
+              .append('rect')
+              .attr('x', x1)
+              .attr('y', seriesFadeY)
+              .attr('width', Math.min(seriesFadeWidth, innerWidth - x1))
+              .attr('height', seriesFadeHeight)
+              .attr('fill', `url(#${rightSeriesFadeId})`)
+          }
+        }
+
         root
           .append('rect')
-          .attr('x', x0)
+          .attr('x', fogX0)
           .attr('y', 0)
-          .attr('width', width)
+          .attr('width', fogWidth)
           .attr('height', innerHeight)
           .attr('rx', 10)
           .attr('fill', `url(#${gradientId})`)
-          .attr('stroke', 'rgba(231, 254, 134, 0.52)')
-          .attr('stroke-width', 1)
+          .attr('mask', `url(#${maskId})`)
 
         if (showUnderFogDetails) {
           root
             .append('rect')
-            .attr('x', x0)
+            .attr('x', fogX0)
             .attr('y', 0)
-            .attr('width', width)
+            .attr('width', fogWidth)
             .attr('height', innerHeight)
             .attr('rx', 10)
             .attr('fill', 'rgba(231, 254, 134, 0.16)')
+            .attr('mask', `url(#${maskId})`)
         }
-
-        const cloudGroup = root.append('g').attr('opacity', range.tone === 'confirmed' ? 0.9 : 0.75)
-        const cloudCenterX = x0 + width / 2
-        cloudGroup
-          .append('ellipse')
-          .attr('cx', cloudCenterX)
-          .attr('cy', 18)
-          .attr('rx', Math.min(28, width * 0.18))
-          .attr('ry', 9)
-          .attr('fill', 'rgba(231,254,134,0.88)')
-        cloudGroup
-          .append('ellipse')
-          .attr('cx', cloudCenterX - Math.min(18, width * 0.12))
-          .attr('cy', 20)
-          .attr('rx', Math.min(16, width * 0.12))
-          .attr('ry', 7)
-          .attr('fill', 'rgba(239,255,180,0.82)')
-        cloudGroup
-          .append('ellipse')
-          .attr('cx', cloudCenterX + Math.min(18, width * 0.12))
-          .attr('cy', 20)
-          .attr('rx', Math.min(15, width * 0.11))
-          .attr('ry', 6.5)
-          .attr('fill', 'rgba(247,255,212,0.8)')
 
         root
           .append('text')
@@ -1815,6 +1902,7 @@ function App() {
   })
   const [driveBackupStatus, setDriveBackupStatus] = useState('')
   const [isDriveSyncing, setIsDriveSyncing] = useState(false)
+  const [driveAutoReconnectRequired, setDriveAutoReconnectRequired] = useState(false)
   const [rewardMessage, setRewardMessage] = useState('')
   const [isEditorOpen, setIsEditorOpen] = useState(false)
   const [isInsightsOpen, setIsInsightsOpen] = useState(false)
@@ -1954,7 +2042,7 @@ function App() {
   }, [habits, logs, isLoaded, canAutoSave])
 
   useEffect(() => {
-    if (!isLoaded || !driveBackupSettings.enabled || !effectiveDriveClientId) {
+    if (!isLoaded || !driveBackupSettings.enabled || !effectiveDriveClientId || driveAutoReconnectRequired) {
       return
     }
 
@@ -1973,13 +2061,14 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [
     effectiveDriveClientId,
+    driveAutoReconnectRequired,
     driveBackupSettings.enabled,
     exportPayload,
     isLoaded,
   ])
 
   useEffect(() => {
-    if (!isLoaded || !driveBackupSettings.enabled || !effectiveDriveClientId) {
+    if (!isLoaded || !driveBackupSettings.enabled || !effectiveDriveClientId || driveAutoReconnectRequired) {
       return
     }
 
@@ -1999,6 +2088,7 @@ function App() {
     return () => window.clearInterval(timer)
   }, [
     effectiveDriveClientId,
+    driveAutoReconnectRequired,
     driveBackupSettings.enabled,
     driveBackupSettings.intervalMinutes,
     exportPayload,
@@ -2804,6 +2894,7 @@ function App() {
         lastSyncedAt: syncedAt,
         lastError: '',
       }))
+      setDriveAutoReconnectRequired(false)
       lastDriveBackupPayloadRef.current = exportPayload
       setDriveBackupStatus(
         tx(
@@ -2817,11 +2908,25 @@ function App() {
         error instanceof Error
           ? error.message
           : tx('Drive backup failed.', 'پشتیبان‌گیری درایو انجام نشد.')
+      const needsReconnect = message === DRIVE_REAUTH_REQUIRED_MESSAGE
       setDriveBackupSettings((prev) => ({
         ...prev,
-        lastError: message,
+        lastError: needsReconnect
+          ? tx(
+              'Google Drive session expired. Tap “Back up now” to reconnect.',
+              'نشست گوگل‌درایو منقضی شده است. روی «همین حالا پشتیبان بگیر» بزن تا دوباره وصل شود.',
+            )
+          : message,
       }))
-      setDriveBackupStatus(message)
+      setDriveAutoReconnectRequired(needsReconnect)
+      setDriveBackupStatus(
+        needsReconnect
+          ? tx(
+              'Auto backup is paused until you reconnect Google Drive manually.',
+              'پشتیبان‌گیری خودکار تا وقتی گوگل‌درایو را دستی دوباره وصل نکنی متوقف شد.',
+            )
+          : message,
+      )
       return false
     } finally {
       setIsDriveSyncing(false)
@@ -2843,6 +2948,7 @@ function App() {
     setIsDriveSyncing(true)
 
     try {
+      setDriveAutoReconnectRequired(false)
       const restored = await restoreBackupFromDrive({
         clientId,
         fileId: driveBackupSettings.fileId,
@@ -2889,6 +2995,8 @@ function App() {
   }
 
   function resetDriveBackup(): void {
+    clearDriveAccessTokenCache()
+    setDriveAutoReconnectRequired(false)
     setDriveBackupSettings({
       ...defaultDriveBackupSettings(),
       clientId: configuredDriveClientId,
@@ -2955,6 +3063,7 @@ function App() {
     }
 
     await clearPersistedState()
+    clearDriveAccessTokenCache()
 
     if (typeof window !== 'undefined') {
       for (const key of [
@@ -2994,6 +3103,7 @@ function App() {
       ...defaultDriveBackupSettings(),
       clientId: configuredDriveClientId,
     })
+    setDriveAutoReconnectRequired(false)
     lastDriveBackupPayloadRef.current = ''
     setDriveBackupStatus(
       tx(
@@ -4053,10 +4163,24 @@ function App() {
               </p>
               <p className="meta-line">
                 {tx(
-                  'Drive keeps one rolling latest backup plus one snapshot per day for the last 3 days.',
-                  'درایو یک پشتیبانِ آخرین وضعیت و علاوه بر آن یک اسنپ‌شات روزانه برای ۳ روز اخیر نگه می‌دارد.',
+                  'Storage location: Google Drive app data (hidden by Google, not a visible folder in My Drive).',
+                  'محل ذخیره: app data گوگل‌درایو (توسط گوگل مخفی است و در My Drive به‌صورت پوشهٔ معمولی دیده نمی‌شود).',
                 )}
               </p>
+              <p className="meta-line">
+                {tx(
+                  'Expected files there: habit-feed-backup.json plus one daily snapshot for each of the last 3 days.',
+                  'فایل‌های مورد انتظار آن‌جا: habit-feed-backup.json به‌علاوه یک اسنپ‌شات روزانه برای هر کدام از ۳ روز اخیر.',
+                )}
+              </p>
+              {!driveBackupSettings.lastSyncedAt && !driveBackupSettings.lastError && (
+                <p className="backup-error">
+                  {tx(
+                    'No backup has reached Google Drive yet on this device. Use “Back up now” once to confirm cloud sync is working.',
+                    'هنوز هیچ پشتیبانی از این دستگاه به گوگل‌درایو نرسیده است. یک‌بار روی «همین حالا پشتیبان بگیر» بزن تا مطمئن شوی همگام‌سازی ابری کار می‌کند.',
+                  )}
+                </p>
+              )}
               {driveBackupSettings.lastError && (
                 <p className="backup-error">{driveBackupSettings.lastError}</p>
               )}
