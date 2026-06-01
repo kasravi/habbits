@@ -964,6 +964,49 @@ function formatRelativeDateTime(value: string | null, language: 'en' | 'fa'): st
   }).format(date)
 }
 
+function formatTimeAgo(value: string | null, now: Date, language: 'en' | 'fa'): string {
+  if (!value) {
+    return language === 'fa' ? 'هنوز نه' : 'Not yet'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return language === 'fa' ? 'نامشخص' : 'Unknown'
+  }
+
+  const diffMs = date.getTime() - now.getTime()
+  const absMs = Math.abs(diffMs)
+  const rtf = new Intl.RelativeTimeFormat(language === 'fa' ? 'fa-IR' : 'en-US', {
+    numeric: 'auto',
+  })
+
+  if (absMs < 60_000) {
+    return rtf.format(Math.round(diffMs / 1000), 'second')
+  }
+
+  if (absMs < 60 * 60_000) {
+    return rtf.format(Math.round(diffMs / 60_000), 'minute')
+  }
+
+  if (absMs < 24 * 60 * 60_000) {
+    return rtf.format(Math.round(diffMs / (60 * 60_000)), 'hour')
+  }
+
+  if (absMs < 7 * 24 * 60 * 60_000) {
+    return rtf.format(Math.round(diffMs / (24 * 60 * 60_000)), 'day')
+  }
+
+  if (absMs < 30 * 24 * 60 * 60_000) {
+    return rtf.format(Math.round(diffMs / (7 * 24 * 60 * 60_000)), 'week')
+  }
+
+  if (absMs < 365 * 24 * 60 * 60_000) {
+    return rtf.format(Math.round(diffMs / (30 * 24 * 60 * 60_000)), 'month')
+  }
+
+  return rtf.format(Math.round(diffMs / (365 * 24 * 60 * 60_000)), 'year')
+}
+
 function formatDayKeyForDisplay(dayKey: string, language: 'en' | 'fa'): string {
   const date = dayKeyToDate(dayKey)
   return new Intl.DateTimeFormat(language === 'fa' ? 'fa-IR' : 'en-US', {
@@ -2396,6 +2439,11 @@ function App() {
     }
     return strengthDaySeries[strengthDaySeries.length - 1].value - strengthDaySeries[0].value
   }, [strengthDaySeries])
+
+  const backupAgeLabel = useMemo(
+    () => formatTimeAgo(driveBackupSettings.lastSyncedAt, clockNow, language),
+    [driveBackupSettings.lastSyncedAt, clockNow, language],
+  )
 
   const averageStrength = useMemo(() => {
     if (!activeHabits.length) {
@@ -4238,6 +4286,11 @@ function App() {
                     : tx('Total growth (full range)', 'رشد کل (بازه کامل)')}
                 </span>
                 <strong>{totalGrowth >= 0 ? '+' : ''}{totalGrowth.toFixed(1)}%</strong>
+              </article>
+              <article>
+                <span>{tx('Last cloud backup', 'آخرین پشتیبان ابری')}</span>
+                <strong>{backupAgeLabel}</strong>
+                <small>{formatRelativeDateTime(driveBackupSettings.lastSyncedAt, language)}</small>
               </article>
             </div>
 

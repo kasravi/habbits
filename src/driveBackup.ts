@@ -192,7 +192,7 @@ async function getAccessToken(clientId: string, interactive: boolean): Promise<s
     })
 
   if (interactive) {
-    return requestToken('consent')
+    return requestToken('')
   }
 
   return requestToken('none')
